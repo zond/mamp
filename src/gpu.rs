@@ -9,8 +9,6 @@ pub struct GpuContext {
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
-    pub surface: Surface<'static>,
-    pub surface_format: TextureFormat,
     pub rgba_to_chw_module: ShaderModule,
     pub chw_to_rgba_module: ShaderModule,
 }
@@ -80,15 +78,10 @@ impl GpuContext {
             source: ShaderSource::Wgsl(include_str!("shaders/chw_to_rgba.wgsl").into()),
         });
 
-        let caps = surface.get_capabilities(&adapter);
-        log::info!("Surface caps: formats={:?}, alpha_modes={:?}, present_modes={:?}",
-            caps.formats, caps.alpha_modes, caps.present_modes);
+        // Drop the temporary surface — we'll create the real one after we know the resolution
+        drop(surface);
 
-        let surface_format = caps.formats.first().copied()
-            .expect("Surface has no supported formats — adapter/surface are incompatible");
-        log::info!("Using surface format: {:?}", surface_format);
-
-        Self { instance, adapter, device, queue, surface, surface_format, rgba_to_chw_module, chw_to_rgba_module }
+        Self { instance, adapter, device, queue, rgba_to_chw_module, chw_to_rgba_module }
     }
 
     pub fn create_buffer_init(&self, label: &str, data: &[f32], usage: BufferUsages) -> Buffer {

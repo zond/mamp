@@ -65,6 +65,7 @@ pub struct EvmPipeline {
     upsample_add_pipeline: ComputePipeline,
 
     // Render pipeline (blit to canvas)
+    surface: Surface<'static>,
     render_pipeline: RenderPipeline,
 
     // Buffers
@@ -134,33 +135,38 @@ impl EvmPipeline {
                 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
 
-        // Configure surface at the canvas's HTML size (NOT the processing resolution).
-        // Setting canvas.width/height resets the WebGPU context, so we must use
-        // whatever size the canvas already has and scale in the blit shader.
+        // Set canvas size to processing resolution BEFORE creating surface.
+        // HTML canvas width/height = pixel buffer size. CSS handles display scaling.
         let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
             .document().unwrap()
             .get_element_by_id("output").unwrap()
             .unchecked_into();
-        let surf_w = canvas.width();
-        let surf_h = canvas.height();
-        let caps = ctx.surface.get_capabilities(&ctx.adapter);
+        canvas.set_width(w);
+        canvas.set_height(h);
+
+        // Create surface on the correctly-sized canvas
+        let surface = ctx.instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .expect("Failed to create surface");
+
+        let caps = surface.get_capabilities(&ctx.adapter);
         let alpha_mode = caps.alpha_modes.first().copied()
             .unwrap_or(CompositeAlphaMode::Auto);
         let present_mode = caps.present_modes.first().copied()
             .unwrap_or(PresentMode::Fifo);
-        log::info!("Surface configure: {}x{} (processing {}x{}), format={:?}, alpha={:?}, present={:?}",
-            surf_w, surf_h, w, h, ctx.surface_format, alpha_mode, present_mode);
-        let surface_config = SurfaceConfiguration {
+        let surface_format = caps.formats.first().copied()
+            .expect("No supported surface format");
+        log::info!("Surface: {}x{}, format={:?}, alpha={:?}, present={:?}",
+            w, h, surface_format, alpha_mode, present_mode);
+        surface.configure(&ctx.device, &SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
-            format: ctx.surface_format,
-            width: surf_w,
-            height: surf_h,
+            format: surface_format,
+            width: w,
+            height: h,
             present_mode,
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
-        };
-        ctx.surface.configure(&ctx.device, &surface_config);
+        });
 
         // ── Compute pipelines ──
         let rgba_to_chw_pipeline = ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -222,7 +228,7 @@ impl EvmPipeline {
                 module: &blit_module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
-                    format: ctx.surface_format,
+                    format: surface_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -342,7 +348,7 @@ impl EvmPipeline {
             width: w, height: h, level_w, level_h,
             rgba_to_chw_pipeline, chw_to_rgba_pipeline,
             downsample_pipeline, laplacian_temporal_pipeline, upsample_add_pipeline,
-            render_pipeline,
+            surface, render_pipeline,
             buf_frame_rgba, buf_output_rgba,
             gaussian, lp_high, lp_low, amplified, recon,
             frame_param_buf, blit_param_buf,
@@ -380,7 +386,7 @@ impl EvmPipeline {
         }
 
         // Get surface texture for this frame
-        let tex_result = ctx.surface.get_current_texture();
+        let tex_result = self.surface.get_current_texture();
         let frame_tex = match tex_result {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
@@ -394,12 +400,48 @@ impl EvmPipeline {
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // DEBUG: just copy input RGBA straight to output (skip all EVM)
+        // ── Compute: EVM pipeline ──
+
+        // RGBA → CHW
+        Self::dispatch(&mut encoder, "r2c",
+            &self.rgba_to_chw_pipeline, &self.rgba_to_chw_bg,
+            GpuContext::div_ceil(self.width, 64),
+            GpuContext::div_ceil(self.height, 16), 1);
+
+        // Gaussian pyramid
+        for i in 0..(N_LEVELS - 1) {
+            Self::dispatch(&mut encoder, "ds",
+                &self.downsample_pipeline, &self.downsample_bgs[i],
+                GpuContext::div_ceil(self.level_w[i + 1], 16),
+                GpuContext::div_ceil(self.level_h[i + 1], 16), 1);
+        }
+
+        // Laplacian + temporal bandpass
+        for i in 0..N_LEVELS {
+            Self::dispatch(&mut encoder, "lt",
+                &self.laplacian_temporal_pipeline, &self.laplacian_temporal_bgs[i],
+                GpuContext::div_ceil(self.level_w[i], 16),
+                GpuContext::div_ceil(self.level_h[i], 16), 1);
+        }
+
+        // Reconstruct pyramid
         encoder.copy_buffer_to_buffer(
-            &self.buf_frame_rgba, 0,
-            &self.buf_output_rgba, 0,
-            (self.width * self.height * 4) as u64,
+            &self.amplified[N_LEVELS - 1], 0,
+            &self.recon[N_LEVELS - 1], 0,
+            3 * (self.level_w[N_LEVELS - 1] as u64) * (self.level_h[N_LEVELS - 1] as u64) * 4,
         );
+        for i in (0..(N_LEVELS - 1)).rev() {
+            Self::dispatch(&mut encoder, "ua",
+                &self.upsample_add_pipeline, &self.upsample_add_bgs[i],
+                GpuContext::div_ceil(self.level_w[i], 16),
+                GpuContext::div_ceil(self.level_h[i], 16), 1);
+        }
+
+        // CHW → RGBA
+        Self::dispatch(&mut encoder, "c2r",
+            &self.chw_to_rgba_pipeline, &self.chw_to_rgba_bg,
+            GpuContext::div_ceil(self.width, 64),
+            GpuContext::div_ceil(self.height, 16), 1);
 
         // ── Render: blit to canvas ──
         {

@@ -4,7 +4,7 @@ mod evm;
 mod gpu;
 mod video;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -15,6 +15,13 @@ use video::VideoCapture;
 
 const DEFAULT_MAX_WIDTH: u32 = 640;
 
+/// Running flag lives OUTSIDE the RefCell so it can be toggled without
+/// borrowing AppState. This eliminates all RefCell conflicts on camera switch.
+struct Shared {
+    state: RefCell<AppState>,
+    running: Cell<bool>,
+}
+
 struct AppState {
     ctx: GpuContext,
     evm: EvmPipeline,
@@ -22,7 +29,6 @@ struct AppState {
     amplification: f32,
     freq_low: f32,
     freq_high: f32,
-    running: bool,
     width: u32,
     height: u32,
     cam_w: u32,
@@ -70,32 +76,21 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
         return Err(JsValue::from_str("Not initialized yet"));
     }
     let ptr = state_js.as_f64().unwrap() as usize;
-    let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
+    let shared: &Rc<Shared> = unsafe { &*(ptr as *const Rc<Shared>) };
 
-    // Signal the run_loop to stop, then wait until it's not borrowing state
-    loop {
-        if let Ok(mut s) = state.try_borrow_mut() {
-            s.running = false;
-            break;
-        }
-        yield_to_browser().await;
-    }
+    // Stop the run_loop — no RefCell borrow needed!
+    shared.running.set(false);
 
-    // Wait for run_loop to see running=false and release its borrow
+    // Wait for run_loop to finish its current frame and release the borrow
     loop {
         yield_to_browser().await;
-        // try_borrow_mut succeeds only when run_loop has no borrow at all
-        if state.try_borrow_mut().is_ok() { break; }
+        if shared.state.try_borrow_mut().is_ok() { break; }
     }
 
-    {
-        let s = state.borrow();
-        s.capture.start_with_device(device_id).await?;
-    }
+    shared.state.borrow().capture.start_with_device(device_id).await?;
 
-    // Now safe to take exclusive borrow
     {
-        let mut s = state.borrow_mut();
+        let mut s = shared.state.borrow_mut();
         let (cam_w, cam_h) = s.capture.actual_size();
         let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
@@ -110,7 +105,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
             let ratio = w as f64 / h as f64;
             js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
         }
-        s.running = true;
+        shared.running.set(true);
     }
 
     Ok(())
@@ -142,48 +137,56 @@ pub async fn start() -> Result<(), JsValue> {
     let evm = EvmPipeline::new(&ctx, w, h);
     log::info!("EVM pipeline ready: {}x{}", w, h);
 
-    let state = Rc::new(RefCell::new(AppState {
-        ctx, evm, capture,
-        amplification: 30.0,
-        freq_low: 0.5,
-        freq_high: 3.0,
-        running: true,
-        width: w, height: h,
-        cam_w, cam_h,
-    }));
+    let shared = Rc::new(Shared {
+        state: RefCell::new(AppState {
+            ctx, evm, capture,
+            amplification: 30.0,
+            freq_low: 0.5,
+            freq_high: 3.0,
+            width: w, height: h,
+            cam_w, cam_h,
+        }),
+        running: Cell::new(true),
+    });
 
-    let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
-    js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(state_ptr as f64))?;
+    let shared_ptr = Box::into_raw(Box::new(shared.clone())) as usize;
+    js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(shared_ptr as f64))?;
 
-    wasm_bindgen_futures::spawn_local(run_loop(state.clone()));
+    wasm_bindgen_futures::spawn_local(run_loop(shared.clone()));
 
-    // Expose controls to JS
-    let s1 = state.clone();
-    let set_amp = Closure::wrap(Box::new(move |v: f32| { s1.borrow_mut().amplification = v; }) as Box<dyn FnMut(f32)>);
+    // Expose controls to JS — slider closures use try_borrow_mut to avoid panics
+    let c1 = shared.clone();
+    let set_amp = Closure::wrap(Box::new(move |v: f32| {
+        if let Ok(mut s) = c1.state.try_borrow_mut() { s.amplification = v; }
+    }) as Box<dyn FnMut(f32)>);
     js_sys::Reflect::set(&window, &"setMagnification".into(), set_amp.as_ref())?;
     set_amp.forget();
 
-    let s2 = state.clone();
-    let set_fl = Closure::wrap(Box::new(move |v: f32| { s2.borrow_mut().freq_low = v; }) as Box<dyn FnMut(f32)>);
+    let c2 = shared.clone();
+    let set_fl = Closure::wrap(Box::new(move |v: f32| {
+        if let Ok(mut s) = c2.state.try_borrow_mut() { s.freq_low = v; }
+    }) as Box<dyn FnMut(f32)>);
     js_sys::Reflect::set(&window, &"setFreqLow".into(), set_fl.as_ref())?;
     set_fl.forget();
 
-    let s3 = state.clone();
-    let set_fh = Closure::wrap(Box::new(move |v: f32| { s3.borrow_mut().freq_high = v; }) as Box<dyn FnMut(f32)>);
+    let c3 = shared.clone();
+    let set_fh = Closure::wrap(Box::new(move |v: f32| {
+        if let Ok(mut s) = c3.state.try_borrow_mut() { s.freq_high = v; }
+    }) as Box<dyn FnMut(f32)>);
     js_sys::Reflect::set(&window, &"setFreqHigh".into(), set_fh.as_ref())?;
     set_fh.forget();
 
-    let s4 = state.clone();
-    let toggle = Closure::wrap(Box::new(move || { let mut s = s4.borrow_mut(); s.running = !s.running; }) as Box<dyn FnMut()>);
+    let c4 = shared.clone();
+    let toggle = Closure::wrap(Box::new(move || {
+        c4.running.set(!c4.running.get());
+    }) as Box<dyn FnMut()>);
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
-    let s5 = state.clone();
+    let c5 = shared.clone();
     let set_res = Closure::wrap(Box::new(move |max_w: u32| {
-        if let Ok(mut s) = s5.try_borrow_mut() {
+        if let Ok(mut s) = c5.state.try_borrow_mut() {
             rebuild_evm(&mut s, max_w);
-        } else {
-            log::warn!("Resolution change deferred — frame in progress");
         }
     }) as Box<dyn FnMut(u32)>);
     js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
@@ -211,7 +214,7 @@ fn rebuild_evm(s: &mut AppState, max_w: u32) {
     s.height = h;
 }
 
-async fn run_loop(state: Rc<RefCell<AppState>>) {
+async fn run_loop(shared: Rc<Shared>) {
     let mut frame: Vec<u32> = Vec::new();
     let mut frame_count: u32 = 0;
     let mut last_fps_time = perf_now();
@@ -220,22 +223,21 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     loop {
         next_frame().await;
 
-        let running = state.borrow().running;
-        if !running {
+        if !shared.running.get() {
             yield_to_browser().await;
             continue;
         }
 
         frame.clear();
         {
-            let s = state.borrow();
+            let s = shared.state.borrow();
             if s.capture.grab_frame_into(&mut frame).is_err() {
                 continue;
             }
         }
 
         {
-            let s = state.borrow();
+            let s = shared.state.borrow();
             s.evm.process_and_render(&s.ctx, &frame, s.amplification, s.freq_low, s.freq_high, estimated_fps);
         }
 
@@ -248,7 +250,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             last_fps_time = now;
             let window = web_sys::window().unwrap();
             let _ = js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(fps));
-            let (cw, ch) = { let s = state.borrow(); (s.width, s.height) };
+            let (cw, ch) = { let s = shared.state.borrow(); (s.width, s.height) };
             let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
                 &JsValue::from_str(&format!("{}x{}", cw, ch)));
         }

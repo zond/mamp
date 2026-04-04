@@ -13,7 +13,7 @@ use evm::EvmPipeline;
 use gpu::GpuContext;
 use video::VideoCapture;
 
-const MAX_WIDTH: u32 = 480;
+const MAX_WIDTH: u32 = 4096; // effectively unlimited — use camera native resolution
 
 struct AppState {
     ctx: GpuContext,

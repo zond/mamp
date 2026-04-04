@@ -41,8 +41,10 @@ impl VideoCapture {
         canvas.set_attribute("style", "display:none")?;
         document.body().unwrap().append_child(&canvas)?;
 
+        let ctx_opts = js_sys::Object::new();
+        js_sys::Reflect::set(&ctx_opts, &"willReadFrequently".into(), &JsValue::TRUE)?;
         let ctx2d = canvas
-            .get_context("2d")?
+            .get_context_with_context_options("2d", &ctx_opts)?
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 

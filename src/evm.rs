@@ -1,13 +1,7 @@
-// evm.rs — Laplacian Pyramid Eulerian Video Magnification
+// evm.rs — Laplacian Pyramid EVM with direct WebGPU canvas rendering
 //
-// Pipeline per frame:
-// 1. RGBA → CHW float
-// 2. Build 4-level Gaussian pyramid (3 downsample dispatches)
-// 3. Laplacian + temporal IIR bandpass at each level (4 dispatches)
-// 4. Reconstruct pyramid (3 upsample+add dispatches)
-// 5. CHW → RGBA + copy to staging
-//
-// Total: 12 dispatches in one encoder submission. No training, no weights.
+// No CPU readback! The compute pipeline writes RGBA to a storage buffer,
+// then a render pipeline blits it directly to the WebGPU canvas surface.
 
 use crate::gpu::GpuContext;
 use bytemuck::{Pod, Zeroable};
@@ -59,54 +53,50 @@ pub struct EvmPipeline {
     pub width: u32,
     pub height: u32,
 
-    // Per-level dimensions
     level_w: [u32; N_LEVELS],
     level_h: [u32; N_LEVELS],
 
-    // Pipelines
+    // Compute pipelines
     rgba_to_chw_pipeline: ComputePipeline,
     chw_to_rgba_pipeline: ComputePipeline,
     downsample_pipeline: ComputePipeline,
     laplacian_temporal_pipeline: ComputePipeline,
     upsample_add_pipeline: ComputePipeline,
 
-    // Frame I/O buffers
+    // Render pipeline (blit to canvas)
+    render_pipeline: RenderPipeline,
+    surface: Surface<'static>,
+    surface_config: SurfaceConfiguration,
+
+    // Buffers
     buf_frame_rgba: Buffer,
-    buf_output_rgba: Buffer,
-    pub buf_staging: Buffer,
-
-    // Gaussian pyramid: gaussian[0] = input CHW
+    buf_output_rgba: Buffer, // compute output, read by render pipeline
     gaussian: [Buffer; N_LEVELS],
-
-    // IIR temporal filter state (persistent across frames, levels 0..N_LEVELS-1)
     lp_high: [Buffer; N_LEVELS],
     lp_low: [Buffer; N_LEVELS],
-
-    // Amplified Laplacian per level
     amplified: [Buffer; N_LEVELS],
-
-    // Reconstruction output per level
     recon: [Buffer; N_LEVELS],
 
-    // Pre-built uniform buffers
+    // Uniforms
     frame_param_buf: Buffer,
+    blit_param_buf: Buffer,
     downsample_param_bufs: [Buffer; N_LEVELS - 1],
     level_param_bufs: [Buffer; N_LEVELS],
     upsample_add_param_bufs: [Buffer; N_LEVELS - 1],
 
-    // Pre-built bind groups
+    // Bind groups
     rgba_to_chw_bg: BindGroup,
     chw_to_rgba_bg: BindGroup,
+    blit_bg: BindGroup,
     downsample_bgs: [BindGroup; N_LEVELS - 1],
     laplacian_temporal_bgs: [BindGroup; N_LEVELS],
     upsample_add_bgs: [BindGroup; N_LEVELS - 1],
 }
 
 impl EvmPipeline {
-    pub fn new(ctx: &GpuContext, w: u32, h: u32) -> Self {
+    pub fn new(ctx: &GpuContext, instance: &Instance, canvas: web_sys::HtmlCanvasElement, w: u32, h: u32) -> Self {
         assert!(w > 0 && h > 0);
 
-        // Compute per-level dimensions
         let mut level_w = [0u32; N_LEVELS];
         let mut level_h = [0u32; N_LEVELS];
         level_w[0] = w;
@@ -120,38 +110,48 @@ impl EvmPipeline {
         let scd = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
         let pixels = (w * h) as u64;
 
-        // Frame I/O
         let buf_frame_rgba = ctx.create_buffer("evm_frame", pixels * 4, scd);
-        let buf_output_rgba = ctx.create_buffer("evm_out_rgba", pixels * 4,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC);
-        let buf_staging = ctx.create_buffer("evm_staging", pixels * 4,
-            BufferUsages::MAP_READ | BufferUsages::COPY_DST);
+        let buf_output_rgba = ctx.create_buffer("evm_out", pixels * 4, s);
 
-        // Gaussian pyramid buffers
         let gaussian: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let sz = 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4;
-            ctx.create_buffer(&format!("g{}", i), sz, s)
+            ctx.create_buffer(&format!("g{}", i),
+                3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
-
-        // IIR state + amplified + recon buffers per level
         let lp_high: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let sz = 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4;
-            ctx.create_buffer(&format!("lph{}", i), sz, s)
+            ctx.create_buffer(&format!("lph{}", i),
+                3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
         let lp_low: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let sz = 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4;
-            ctx.create_buffer(&format!("lpl{}", i), sz, s)
+            ctx.create_buffer(&format!("lpl{}", i),
+                3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
         let amplified: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let sz = 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4;
-            ctx.create_buffer(&format!("amp{}", i), sz, s)
+            ctx.create_buffer(&format!("amp{}", i),
+                3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
         let recon: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let sz = 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4;
-            ctx.create_buffer(&format!("rec{}", i), sz, s)
+            ctx.create_buffer(&format!("rec{}", i),
+                3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
 
-        // Pipelines
+        // ── Surface for direct canvas rendering ──
+        let surface = instance.create_surface(
+            wgpu::SurfaceTarget::Canvas(canvas),
+        ).expect("Failed to create surface");
+
+        let surface_config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: TextureFormat::Bgra8Unorm,
+            width: w,
+            height: h,
+            present_mode: PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
+        surface.configure(&ctx.device, &surface_config);
+
+        // ── Compute pipelines ──
         let rgba_to_chw_pipeline = ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("evm_r2c"), layout: None,
             module: &ctx.rgba_to_chw_module, entry_point: Some("main"),
@@ -193,39 +193,70 @@ impl EvmPipeline {
             compilation_options: Default::default(), cache: None,
         });
 
-        // Uniform buffers
-        let frame_params = FrameParams { width: w, height: h, _pad0: 0, _pad1: 0 };
-        let frame_param_buf = ctx.create_uniform("evm_fp", &frame_params);
-
-        let downsample_param_bufs: [Buffer; N_LEVELS - 1] = std::array::from_fn(|i| {
-            let p = DownsampleParams {
-                in_width: level_w[i], in_height: level_h[i],
-                out_width: level_w[i + 1], out_height: level_h[i + 1],
-            };
-            ctx.create_uniform(&format!("ds_p{}", i), &p)
+        // ── Blit render pipeline ──
+        let blit_module = ctx.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("blit"),
+            source: ShaderSource::Wgsl(include_str!("shaders/blit.wgsl").into()),
+        });
+        let render_pipeline = ctx.device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("blit"),
+            layout: None,
+            vertex: VertexState {
+                module: &blit_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &blit_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(ColorTargetState {
+                    format: TextureFormat::Bgra8Unorm,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
 
-        // Level params will be updated each frame (alpha/freq change)
+        // ── Uniform buffers ──
+        let frame_params = FrameParams { width: w, height: h, _pad0: 0, _pad1: 0 };
+        let frame_param_buf = ctx.create_uniform("evm_fp", &frame_params);
+        let blit_param_buf = ctx.create_uniform("blit_p", &[w, h]);
+
+        let downsample_param_bufs: [Buffer; N_LEVELS - 1] = std::array::from_fn(|i| {
+            ctx.create_uniform(&format!("ds_p{}", i), &DownsampleParams {
+                in_width: level_w[i], in_height: level_h[i],
+                out_width: level_w[i + 1], out_height: level_h[i + 1],
+            })
+        });
+
         let level_param_bufs: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
-            let p = LevelParams {
+            ctx.create_uniform(&format!("lp{}", i), &LevelParams {
                 width: level_w[i], height: level_h[i],
                 coarse_width: if i + 1 < N_LEVELS { level_w[i + 1] } else { 0 },
                 coarse_height: if i + 1 < N_LEVELS { level_h[i + 1] } else { 0 },
                 alpha_low: 0.0, alpha_high: 0.0, amplification: 0.0,
                 is_coarsest: if i == N_LEVELS - 1 { 1 } else { 0 },
-            };
-            ctx.create_uniform(&format!("lp{}", i), &p)
+            })
         });
 
         let upsample_add_param_bufs: [Buffer; N_LEVELS - 1] = std::array::from_fn(|i| {
-            let p = UpsampleAddParams {
+            ctx.create_uniform(&format!("ua_p{}", i), &UpsampleAddParams {
                 fine_width: level_w[i], fine_height: level_h[i],
                 coarse_width: level_w[i + 1], coarse_height: level_h[i + 1],
-            };
-            ctx.create_uniform(&format!("ua_p{}", i), &p)
+            })
         });
 
-        // Bind groups
+        // ── Bind groups ──
         let rgba_to_chw_bg = ctx.device.create_bind_group(&BindGroupDescriptor {
             label: Some("r2c_bg"),
             layout: &rgba_to_chw_pipeline.get_bind_group_layout(0),
@@ -246,6 +277,15 @@ impl EvmPipeline {
             ],
         });
 
+        let blit_bg = ctx.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("blit_bg"),
+            layout: &render_pipeline.get_bind_group_layout(0),
+            entries: &[
+                BindGroupEntry { binding: 0, resource: blit_param_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: buf_output_rgba.as_entire_binding() },
+            ],
+        });
+
         let downsample_bgs: [BindGroup; N_LEVELS - 1] = std::array::from_fn(|i| {
             ctx.device.create_bind_group(&BindGroupDescriptor {
                 label: Some(&format!("ds_bg{}", i)),
@@ -259,14 +299,14 @@ impl EvmPipeline {
         });
 
         let laplacian_temporal_bgs: [BindGroup; N_LEVELS] = std::array::from_fn(|i| {
-            let coarse_buf = if i + 1 < N_LEVELS { &gaussian[i + 1] } else { &gaussian[i] };
+            let coarse = if i + 1 < N_LEVELS { &gaussian[i + 1] } else { &gaussian[i] };
             ctx.device.create_bind_group(&BindGroupDescriptor {
                 label: Some(&format!("lt_bg{}", i)),
                 layout: &laplacian_temporal_pipeline.get_bind_group_layout(0),
                 entries: &[
                     BindGroupEntry { binding: 0, resource: level_param_bufs[i].as_entire_binding() },
                     BindGroupEntry { binding: 1, resource: gaussian[i].as_entire_binding() },
-                    BindGroupEntry { binding: 2, resource: coarse_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 2, resource: coarse.as_entire_binding() },
                     BindGroupEntry { binding: 3, resource: lp_high[i].as_entire_binding() },
                     BindGroupEntry { binding: 4, resource: lp_low[i].as_entire_binding() },
                     BindGroupEntry { binding: 5, resource: amplified[i].as_entire_binding() },
@@ -291,14 +331,18 @@ impl EvmPipeline {
             width: w, height: h, level_w, level_h,
             rgba_to_chw_pipeline, chw_to_rgba_pipeline,
             downsample_pipeline, laplacian_temporal_pipeline, upsample_add_pipeline,
-            buf_frame_rgba, buf_output_rgba, buf_staging,
+            render_pipeline, surface, surface_config,
+            buf_frame_rgba, buf_output_rgba,
             gaussian, lp_high, lp_low, amplified, recon,
-            frame_param_buf, downsample_param_bufs, level_param_bufs, upsample_add_param_bufs,
-            rgba_to_chw_bg, chw_to_rgba_bg, downsample_bgs, laplacian_temporal_bgs, upsample_add_bgs,
+            frame_param_buf, blit_param_buf,
+            downsample_param_bufs, level_param_bufs, upsample_add_param_bufs,
+            rgba_to_chw_bg, chw_to_rgba_bg, blit_bg,
+            downsample_bgs, laplacian_temporal_bgs, upsample_add_bgs,
         }
     }
 
-    pub fn process_frame(
+    /// Process one frame: EVM compute + render to canvas. No CPU readback needed.
+    pub fn process_and_render(
         &self,
         ctx: &GpuContext,
         frame_rgba: &[u32],
@@ -311,10 +355,8 @@ impl EvmPipeline {
         let alpha_low = 1.0 - (-two_pi * freq_low / fps).exp();
         let alpha_high = 1.0 - (-two_pi * freq_high / fps).exp();
 
-        // Upload frame
         ctx.queue.write_buffer(&self.buf_frame_rgba, 0, bytemuck::cast_slice(frame_rgba));
 
-        // Update per-level temporal params
         for i in 0..N_LEVELS {
             let p = LevelParams {
                 width: self.level_w[i], height: self.level_h[i],
@@ -326,17 +368,29 @@ impl EvmPipeline {
             ctx.queue.write_buffer(&self.level_param_bufs[i], 0, bytemuck::bytes_of(&p));
         }
 
+        // Get surface texture for this frame
+        let frame_tex = match self.surface.get_current_texture() {
+            CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => t,
+            other => {
+                log::error!("Surface texture unavailable: {:?}", other);
+                return;
+            }
+        };
+        let view = frame_tex.texture.create_view(&TextureViewDescriptor::default());
+
         let mut encoder = ctx.device.create_command_encoder(
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // 1. RGBA → CHW (into gaussian[0])
+        // ── Compute: EVM pipeline ──
+
+        // RGBA → CHW
         Self::dispatch(&mut encoder, "r2c",
             &self.rgba_to_chw_pipeline, &self.rgba_to_chw_bg,
             GpuContext::div_ceil(self.width, 64),
             GpuContext::div_ceil(self.height, 16), 1);
 
-        // 2. Gaussian pyramid: downsample levels 0→1, 1→2, 2→3
+        // Gaussian pyramid
         for i in 0..(N_LEVELS - 1) {
             Self::dispatch(&mut encoder, "ds",
                 &self.downsample_pipeline, &self.downsample_bgs[i],
@@ -344,7 +398,7 @@ impl EvmPipeline {
                 GpuContext::div_ceil(self.level_h[i + 1], 16), 1);
         }
 
-        // 3. Laplacian + temporal bandpass at each level
+        // Laplacian + temporal bandpass
         for i in 0..N_LEVELS {
             Self::dispatch(&mut encoder, "lt",
                 &self.laplacian_temporal_pipeline, &self.laplacian_temporal_bgs[i],
@@ -352,14 +406,12 @@ impl EvmPipeline {
                 GpuContext::div_ceil(self.level_h[i], 16), 1);
         }
 
-        // 4. Reconstruct pyramid (coarsest to finest)
-        // recon[N-1] = amplified[N-1] (copy coarsest residual)
+        // Reconstruct pyramid
         encoder.copy_buffer_to_buffer(
             &self.amplified[N_LEVELS - 1], 0,
             &self.recon[N_LEVELS - 1], 0,
             3 * (self.level_w[N_LEVELS - 1] as u64) * (self.level_h[N_LEVELS - 1] as u64) * 4,
         );
-        // recon[i] = amplified[i] + upsample(recon[i+1])
         for i in (0..(N_LEVELS - 1)).rev() {
             Self::dispatch(&mut encoder, "ua",
                 &self.upsample_add_pipeline, &self.upsample_add_bgs[i],
@@ -367,32 +419,46 @@ impl EvmPipeline {
                 GpuContext::div_ceil(self.level_h[i], 16), 1);
         }
 
-        // 5. CHW → RGBA
+        // CHW → RGBA
         Self::dispatch(&mut encoder, "c2r",
             &self.chw_to_rgba_pipeline, &self.chw_to_rgba_bg,
             GpuContext::div_ceil(self.width, 64),
             GpuContext::div_ceil(self.height, 16), 1);
 
-        // 6. Copy to staging
-        encoder.copy_buffer_to_buffer(
-            &self.buf_output_rgba, 0,
-            &self.buf_staging, 0,
-            (self.width * self.height * 4) as u64,
-        );
+        // ── Render: blit to canvas ──
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("blit"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.render_pipeline);
+            pass.set_bind_group(0, Some(&self.blit_bg), &[]);
+            pass.draw(0..6, 0..1);
+        }
 
         ctx.queue.submit(std::iter::once(encoder.finish()));
+        frame_tex.present();
     }
 
     fn dispatch(
-        encoder: &mut CommandEncoder,
-        label: &str,
-        pipeline: &ComputePipeline,
-        bg: &BindGroup,
+        encoder: &mut CommandEncoder, label: &str,
+        pipeline: &ComputePipeline, bg: &BindGroup,
         x: u32, y: u32, z: u32,
     ) {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
+            label: Some(label), timestamp_writes: None,
         });
         GpuContext::record_dispatch(&mut pass, pipeline, bg, (x, y, z));
     }

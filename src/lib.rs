@@ -4,29 +4,27 @@ mod evm;
 mod gpu;
 mod video;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use evm::EvmPipeline;
 use gpu::GpuContext;
-use video::{OutputRenderer, VideoCapture};
+use video::VideoCapture;
 
 const MAX_WIDTH: u32 = 480;
-const FRAME_TIME_ALPHA: f64 = 0.1;
 
 struct AppState {
     ctx: GpuContext,
     evm: EvmPipeline,
     capture: VideoCapture,
-    renderer: OutputRenderer,
     amplification: f32,
     freq_low: f32,
     freq_high: f32,
     running: bool,
     width: u32,
     height: u32,
-    generation: Rc<Cell<u32>>,
 }
 
 fn processing_size(cam_w: u32, cam_h: u32) -> (u32, u32) {
@@ -49,15 +47,19 @@ fn perf_now() -> f64 {
 
 async fn yield_to_browser() {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
-        web_sys::window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
-            .unwrap();
+        web_sys::window().unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0).unwrap();
     });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
-/// Called from JS when the user picks a camera.
+fn get_canvas() -> web_sys::HtmlCanvasElement {
+    web_sys::window().unwrap()
+        .document().unwrap()
+        .get_element_by_id("output").unwrap()
+        .dyn_into::<web_sys::HtmlCanvasElement>().unwrap()
+}
+
 #[wasm_bindgen]
 pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     let window = web_sys::window().unwrap();
@@ -71,9 +73,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     {
         let mut s = state.borrow_mut();
         s.running = false;
-        s.generation.set(s.generation.get() + 1);
     }
-
     yield_to_browser().await;
     yield_to_browser().await;
 
@@ -87,20 +87,19 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            s.evm = EvmPipeline::new(&s.ctx, w, h);
-            s.renderer = OutputRenderer::new("output", w, h)?;
+            let canvas = get_canvas();
+            canvas.set_width(w);
+            canvas.set_height(h);
+            s.evm = EvmPipeline::new(&s.ctx, &s.ctx.instance, canvas, w, h);
             s.width = w;
             s.height = h;
 
             let ratio = w as f64 / h as f64;
             js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
         }
-
         s.running = true;
     }
 
-    // Don't spawn a new run_loop — the existing one is still alive,
-    // polling s.running. It will resume on the next iteration.
     Ok(())
 }
 
@@ -114,7 +113,6 @@ pub async fn start() -> Result<(), JsValue> {
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
 
-    // Start camera to detect resolution
     let mut capture = VideoCapture::new(MAX_WIDTH, MAX_WIDTH * 3 / 4)?;
     capture.start_with_device("").await?;
     let (cam_w, cam_h) = capture.actual_size();
@@ -126,23 +124,19 @@ pub async fn start() -> Result<(), JsValue> {
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let evm = EvmPipeline::new(&ctx, w, h);
+    let canvas = get_canvas();
+    canvas.set_width(w);
+    canvas.set_height(h);
+    let evm = EvmPipeline::new(&ctx, &ctx.instance, canvas, w, h);
     log::info!("EVM pipeline ready: {}x{}", w, h);
 
-    let renderer = OutputRenderer::new("output", w, h)?;
-
     let state = Rc::new(RefCell::new(AppState {
-        ctx,
-        evm,
-        capture,
-        renderer,
-        amplification: 20.0,
+        ctx, evm, capture,
+        amplification: 30.0,
         freq_low: 0.5,
         freq_high: 3.0,
         running: true,
-        width: w,
-        height: h,
-        generation: Rc::new(Cell::new(0)),
+        width: w, height: h,
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -152,31 +146,22 @@ pub async fn start() -> Result<(), JsValue> {
 
     // Expose controls to JS
     let s1 = state.clone();
-    let set_amp = Closure::wrap(Box::new(move |v: f32| {
-        s1.borrow_mut().amplification = v;
-    }) as Box<dyn FnMut(f32)>);
+    let set_amp = Closure::wrap(Box::new(move |v: f32| { s1.borrow_mut().amplification = v; }) as Box<dyn FnMut(f32)>);
     js_sys::Reflect::set(&window, &"setMagnification".into(), set_amp.as_ref())?;
     set_amp.forget();
 
     let s2 = state.clone();
-    let set_freq_low = Closure::wrap(Box::new(move |v: f32| {
-        s2.borrow_mut().freq_low = v;
-    }) as Box<dyn FnMut(f32)>);
-    js_sys::Reflect::set(&window, &"setFreqLow".into(), set_freq_low.as_ref())?;
-    set_freq_low.forget();
+    let set_fl = Closure::wrap(Box::new(move |v: f32| { s2.borrow_mut().freq_low = v; }) as Box<dyn FnMut(f32)>);
+    js_sys::Reflect::set(&window, &"setFreqLow".into(), set_fl.as_ref())?;
+    set_fl.forget();
 
     let s3 = state.clone();
-    let set_freq_high = Closure::wrap(Box::new(move |v: f32| {
-        s3.borrow_mut().freq_high = v;
-    }) as Box<dyn FnMut(f32)>);
-    js_sys::Reflect::set(&window, &"setFreqHigh".into(), set_freq_high.as_ref())?;
-    set_freq_high.forget();
+    let set_fh = Closure::wrap(Box::new(move |v: f32| { s3.borrow_mut().freq_high = v; }) as Box<dyn FnMut(f32)>);
+    js_sys::Reflect::set(&window, &"setFreqHigh".into(), set_fh.as_ref())?;
+    set_fh.forget();
 
     let s4 = state.clone();
-    let toggle = Closure::wrap(Box::new(move || {
-        let mut s = s4.borrow_mut();
-        s.running = !s.running;
-    }) as Box<dyn FnMut()>);
+    let toggle = Closure::wrap(Box::new(move || { s4.borrow_mut().running = !s4.borrow().running; }) as Box<dyn FnMut()>);
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
@@ -186,58 +171,25 @@ pub async fn start() -> Result<(), JsValue> {
 }
 
 async fn next_frame() {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        web_sys::window()
-            .unwrap()
-            .request_animation_frame(&resolve)
-            .unwrap();
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window().unwrap().request_animation_frame(&resolve).unwrap();
     });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
 async fn run_loop(state: Rc<RefCell<AppState>>) {
-    let mut magnified_pixels: Vec<u32> = Vec::new();
-    let mut has_magnified = false;
+    let mut frame: Vec<u32> = Vec::new();
     let mut frame_count: u32 = 0;
     let mut last_fps_time = perf_now();
-    let mut frame: Vec<u32> = Vec::new();
-    let mut avg_frame_time: f64 = 0.0;
     let mut estimated_fps: f32 = 30.0;
-
-    // Shared readback flag — reused across frames, reset before each map_async.
-    let map_ready = Rc::new(Cell::new(false));
-    let mut map_pending = false;
 
     loop {
         next_frame().await;
-        let t0 = perf_now();
 
         let running = state.borrow().running;
         if !running {
-            // Generation may have changed (camera switch). Discard any pending readback.
-            if map_pending {
-                map_pending = false;
-                has_magnified = false;
-            }
             yield_to_browser().await;
             continue;
-        }
-
-        // If previous readback completed, grab the magnified pixels
-        if map_pending && map_ready.get() {
-            if let Ok(s) = state.try_borrow() {
-                let view = s.evm.buf_staging.slice(..).get_mapped_range();
-                let pixels: &[u32] = bytemuck::cast_slice(&view);
-                magnified_pixels.clear();
-                magnified_pixels.extend_from_slice(pixels);
-                has_magnified = true;
-                drop(view);
-                s.evm.buf_staging.unmap();
-            }
-            map_pending = false;
-            map_ready.set(false);
-        } else if map_pending {
-            // Still waiting for readback — skip EVM this frame, just show camera
         }
 
         // Grab camera frame
@@ -249,78 +201,14 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Run EVM + readback (only if no pending readback)
-        if !map_pending {
-            let (amp, fl, fh) = {
-                let s = state.borrow();
-                (s.amplification, s.freq_low, s.freq_high)
-            };
-            {
-                let s = state.borrow();
-                s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
-            }
-
-            map_ready.set(false);
-            {
-                let s = state.borrow();
-                let flag = map_ready.clone();
-                s.evm.buf_staging.slice(..).map_async(
-                    wgpu::MapMode::Read,
-                    move |r| { if r.is_ok() { flag.set(true); } },
-                );
-            }
-            map_pending = true;
-
-            // Yield multiple times to give GPU callbacks a chance to fire.
-            for _ in 0..3 {
-                yield_to_browser().await;
-                if map_ready.get() { break; }
-            }
-
-            if map_ready.get() {
-                if let Ok(s) = state.try_borrow() {
-                    let view = s.evm.buf_staging.slice(..).get_mapped_range();
-                    let pixels: &[u32] = bytemuck::cast_slice(&view);
-                    magnified_pixels.clear();
-                    magnified_pixels.extend_from_slice(pixels);
-                    has_magnified = true;
-                    drop(view);
-                    s.evm.buf_staging.unmap();
-                }
-                map_pending = false;
-                map_ready.set(false);
-            } else {
-                // Timed out — unmap (cancels pending map) so we can retry next frame
-                log::warn!("map_async not ready after 3 yields, retrying");
-                if let Ok(s) = state.try_borrow() {
-                    s.evm.buf_staging.unmap();
-                }
-                map_pending = false;
-            }
-        }
-
-        // Always show the latest camera frame, overlay magnified when available
+        // Run EVM compute + render directly to canvas (no CPU readback!)
         {
             let s = state.borrow();
-            if has_magnified && !magnified_pixels.is_empty() {
-                let _ = s.renderer.draw(&magnified_pixels);
-            } else {
-                let _ = s.renderer.draw(&frame);
-            }
-        }
-
-        // Periodic debug logging
-        if frame_count < 5 || frame_count % 60 == 0 {
-            log::info!("frame={} map_pending={} map_ready={} has_mag={} pixels={}",
-                frame_count, map_pending, map_ready.get(), has_magnified, frame.len());
+            s.evm.process_and_render(&s.ctx, &frame, s.amplification, s.freq_low, s.freq_high, estimated_fps);
         }
 
         // FPS tracking
         frame_count += 1;
-        let elapsed = perf_now() - t0;
-        avg_frame_time = if avg_frame_time == 0.0 { elapsed }
-            else { FRAME_TIME_ALPHA * elapsed + (1.0 - FRAME_TIME_ALPHA) * avg_frame_time };
-
         let now = perf_now();
         if now - last_fps_time >= 1000.0 {
             let fps = (frame_count as f64 / (now - last_fps_time)) * 1000.0;

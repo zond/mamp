@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, HtmlVideoElement,
-    MediaStreamConstraints, ImageData,
+    MediaStreamConstraints,
 };
 
 /// Manages camera capture and frame extraction.
@@ -150,42 +150,3 @@ impl VideoCapture {
 
 }
 
-/// Render output: write RGBA u32 data to a visible canvas.
-pub struct OutputRenderer {
-    _canvas: HtmlCanvasElement,
-    ctx2d: CanvasRenderingContext2d,
-    width: u32,
-    height: u32,
-}
-
-impl OutputRenderer {
-    pub fn new(canvas_id: &str, width: u32, height: u32) -> Result<Self, JsValue> {
-        let document = web_sys::window().unwrap().document().unwrap();
-        let canvas = document
-            .get_element_by_id(canvas_id)
-            .ok_or("Canvas not found")?
-            .dyn_into::<HtmlCanvasElement>()?;
-        canvas.set_width(width);
-        canvas.set_height(height);
-
-        let ctx2d = canvas
-            .get_context("2d")?
-            .unwrap()
-            .dyn_into::<CanvasRenderingContext2d>()?;
-
-        Ok(Self { _canvas: canvas, ctx2d, width, height })
-    }
-
-    pub fn draw(&self, pixels: &[u32]) -> Result<(), JsValue> {
-        let bytes: &[u8] = bytemuck::cast_slice(pixels);
-        let clamped = wasm_bindgen::Clamped(bytes);
-        let image_data = ImageData::new_with_u8_clamped_array_and_sh(
-            clamped,
-            self.width,
-            self.height,
-        )?;
-        self.ctx2d.put_image_data(&image_data, 0.0, 0.0)?;
-
-        Ok(())
-    }
-}

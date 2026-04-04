@@ -48,6 +48,17 @@ impl VideoCapture {
 
     /// Start camera with optional device ID (empty string = default camera).
     pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
+        // Stop any existing stream first so the device is released
+        if let Some(old_stream) = self.video.src_object() {
+            let old: web_sys::MediaStream = old_stream.unchecked_into();
+            let tracks = old.get_tracks();
+            for i in 0..tracks.length() {
+                let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
+                track.stop();
+            }
+            self.video.set_src_object(None);
+        }
+
         let window = web_sys::window().unwrap();
         let navigator = window.navigator();
         let media_devices = navigator.media_devices()?;

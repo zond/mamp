@@ -113,6 +113,12 @@ fn processing_size(cam_w: u32, cam_h: u32) -> (u32, u32) {
     (w, h)
 }
 
+/// Yield to the browser event loop so pending callbacks (like requestAnimationFrame) can run.
+async fn yield_once() {
+    let promise = js_sys::Promise::resolve(&JsValue::NULL);
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
 /// Called from JS when the user picks a camera.
 #[wasm_bindgen]
 pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
@@ -124,42 +130,43 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     let ptr = state_js.as_f64().unwrap() as usize;
     let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
 
+    // Stop the animation loop and drop the borrow before any await
     {
         let mut s = state.borrow_mut();
         s.running = false;
         s.prev_frame = None;
     }
 
-    // Start capture with new device
+    // Let the animation frame callback finish so it releases its borrow
+    yield_once().await;
+    yield_once().await;
+
+    // Now safe: animation loop has stopped, no concurrent borrows
+    state.borrow().capture.start_with_device(device_id).await?;
+
+    // Detect resolution and rebuild if needed
     {
         let mut s = state.borrow_mut();
-        s.capture.start_with_device(device_id).await?;
-
-        // Detect actual camera resolution and rebuild if changed
         let (cam_w, cam_h) = s.capture.actual_size();
         let (w, h) = processing_size(cam_w, cam_h);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            let weights = ModelWeights::random(); // Use existing weights ideally
+            let weights = ModelWeights::random();
             s.model = MotionMagModel::new(&s.ctx, w, h, &weights);
             s.renderer = OutputRenderer::new("output", w, h)?;
             s.width = w;
             s.height = h;
 
-            // Tell JS the new aspect ratio
             let ratio = w as f64 / h as f64;
             js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
         }
-    }
 
-    {
-        let mut s = state.borrow_mut();
         s.running = true;
     }
-    request_animation_frame(state.clone());
 
+    request_animation_frame(state.clone());
     Ok(())
 }
 

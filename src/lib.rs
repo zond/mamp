@@ -1,171 +1,41 @@
-// lib.rs — WASM entry point for real-time motion magnification
+// lib.rs — WASM entry point for Eulerian Video Magnification
 
+mod evm;
 mod gpu;
-mod model;
 mod video;
-mod weights;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
+use evm::EvmPipeline;
 use gpu::GpuContext;
-use model::{ModelWeights, MotionMagModel};
 use video::{OutputRenderer, VideoCapture};
 
-// Processing resolution caps per quality level.
-// Must be divisible by 2 for the stride-2 encoder.
-const QUALITY_MAX_WIDTHS: [u32; 3] = [480, 320, 240];
-
-/// Adaptive frame-skip thresholds (milliseconds).
-const THRESHOLD_EVERY_FRAME_MS: f64 = 20.0;
-const THRESHOLD_SKIP_HALF_MS: f64 = 33.0;
-const THRESHOLD_SKIP_THREE_QUARTER_MS: f64 = 66.0;
-
-/// EMA smoothing factor for frame time tracking.
+const MAX_WIDTH: u32 = 480;
 const FRAME_TIME_ALPHA: f64 = 0.1;
 
-/// Double-buffered frame storage.  Two pre-allocated `Vec<u32>` buffers are
-/// swapped each frame so that neither allocation nor cloning happens in the
-/// hot loop.
-struct FrameBuffers {
-    pub bufs: [Vec<u32>; 2],
-    /// Index into `bufs` for the *current* (most recently captured) frame.
-    current: usize,
-    /// Set once we have captured at least two frames (so prev is valid).
-    has_prev: bool,
-}
-
-impl FrameBuffers {
-    fn new(pixel_count: usize) -> Self {
-        Self {
-            bufs: [
-                Vec::with_capacity(pixel_count),
-                Vec::with_capacity(pixel_count),
-            ],
-            current: 0,
-            has_prev: false,
-        }
-    }
-
-    /// Advance to the next frame and return the buffer that should receive the
-
-    /// Like advance() but only updates the index, doesn't return a reference.
-    fn advance_index(&mut self) {
-        if !self.bufs[self.current].is_empty() {
-            self.current ^= 1;
-            self.has_prev = true;
-        }
-    }
-
-    fn current_idx(&self) -> usize {
-        self.current
-    }
-
-    fn current_frame(&self) -> &[u32] {
-        &self.bufs[self.current]
-    }
-
-    fn prev_frame(&self) -> Option<&[u32]> {
-        if self.has_prev {
-            Some(&self.bufs[self.current ^ 1])
-        } else {
-            None
-        }
-    }
-
-    /// Reset state (e.g. when switching cameras or changing resolution).
-    fn reset(&mut self) {
-        self.has_prev = false;
-        self.bufs[0].clear();
-        self.bufs[1].clear();
-    }
-}
-
-/// State shared across animation frames.
 struct AppState {
     ctx: GpuContext,
-    model: MotionMagModel,
+    evm: EvmPipeline,
     capture: VideoCapture,
     renderer: OutputRenderer,
-    frames: FrameBuffers,
-    alpha: f32,
+    amplification: f32,
+    freq_low: f32,
+    freq_high: f32,
     running: bool,
     width: u32,
     height: u32,
-    quality: u32,
-    avg_frame_time_ms: f64,
-    frame_index: u64,
-    /// Incremented on camera switch / quality change to invalidate pending readbacks.
     generation: Rc<Cell<u32>>,
 }
 
-async fn load_weights() -> ModelWeights {
-    let layer_specs: &[(&str, usize)] = &[
-        ("enc_conv1.weight", 16 * 3 * 3 * 3),
-        ("enc_conv1.bias", 16),
-        ("enc_conv2.weight", 32 * 16 * 3 * 3),
-        ("enc_conv2.bias", 32),
-        ("enc_conv3.weight", 32 * 32 * 3 * 3),
-        ("enc_conv3.bias", 32),
-        ("enc_texture.weight", 32 * 32 * 1 * 1),
-        ("enc_texture.bias", 32),
-        ("dec_conv1.weight", 32 * 32 * 3 * 3),
-        ("dec_conv1.bias", 32),
-        ("dec_conv2.weight", 16 * 32 * 3 * 3),
-        ("dec_conv2.bias", 16),
-        ("dec_conv3.weight", 3 * 16 * 3 * 3),
-        ("dec_conv3.bias", 3),
-    ];
-
-    // Fetch all 14 weight files in parallel (one round-trip instead of 14)
-    let urls: Vec<String> = layer_specs.iter().map(|(name, _)| format!("weights/{}.bin", name)).collect();
-    let loaded = match weights::load_all_parallel(&urls).await {
-        Ok(data) => data,
-        Err(e) => {
-            log::warn!("Failed to load weights: {:?} — using random", e);
-            return ModelWeights::random();
-        }
-    };
-
-    // Validate sizes
-    for (i, (name, expected_len)) in layer_specs.iter().enumerate() {
-        if loaded[i].len() != *expected_len {
-            log::warn!("{}: expected {} floats, got {} — using random", name, expected_len, loaded[i].len());
-            return ModelWeights::random();
-        }
-    }
-    log::info!("Loaded {} weight tensors in parallel", loaded.len());
-
-    let mut it = loaded.into_iter();
-    ModelWeights {
-        enc_conv1_w: it.next().unwrap(),
-        enc_conv1_b: it.next().unwrap(),
-        enc_conv2_w: it.next().unwrap(),
-        enc_conv2_b: it.next().unwrap(),
-        enc_conv3_w: it.next().unwrap(),
-        enc_conv3_b: it.next().unwrap(),
-        enc_texture_w: it.next().unwrap(),
-        enc_texture_b: it.next().unwrap(),
-        dec_conv1_w: it.next().unwrap(),
-        dec_conv1_b: it.next().unwrap(),
-        dec_conv2_w: it.next().unwrap(),
-        dec_conv2_b: it.next().unwrap(),
-        dec_conv3_w: it.next().unwrap(),
-        dec_conv3_b: it.next().unwrap(),
-    }
-}
-
-/// Compute processing resolution from camera native size.
-/// Scales down to `max_width`, keeps aspect ratio, ensures even dimensions.
-fn processing_size(cam_w: u32, cam_h: u32, max_width: u32) -> (u32, u32) {
-    let (mut w, mut h) = if cam_w > max_width {
-        let scale = max_width as f64 / cam_w as f64;
+fn processing_size(cam_w: u32, cam_h: u32) -> (u32, u32) {
+    let (mut w, mut h) = if cam_w > MAX_WIDTH {
+        let scale = MAX_WIDTH as f64 / cam_w as f64;
         ((cam_w as f64 * scale) as u32, (cam_h as f64 * scale) as u32)
     } else {
         (cam_w, cam_h)
     };
-    // Ensure even (required for stride-2 encoder)
     w &= !1;
     h &= !1;
     if w == 0 { w = 2; }
@@ -173,37 +43,10 @@ fn processing_size(cam_w: u32, cam_h: u32, max_width: u32) -> (u32, u32) {
     (w, h)
 }
 
-/// Return the current time in milliseconds via performance.now().
 fn perf_now() -> f64 {
-    web_sys::window()
-        .unwrap()
-        .performance()
-        .unwrap()
-        .now()
+    web_sys::window().unwrap().performance().unwrap().now()
 }
 
-/// Determine how many out of every N frames should run magnify.
-/// Returns (run_every_nth, period) — run magnify when frame_index % period < run_every_nth.
-fn skip_policy(avg_ms: f64) -> (u64, u64) {
-    if avg_ms < THRESHOLD_EVERY_FRAME_MS {
-        // Fast enough: magnify every frame
-        (1, 1)
-    } else if avg_ms < THRESHOLD_SKIP_HALF_MS {
-        // Moderate: still every frame (between 20-33ms is fine)
-        (1, 1)
-    } else if avg_ms < THRESHOLD_SKIP_THREE_QUARTER_MS {
-        // Slow: skip magnify on alternating frames (run 1 out of 2)
-        (1, 2)
-    } else {
-        // Very slow: run magnify 1 out of 4 frames
-        (1, 4)
-    }
-}
-
-/// Yield to the browser event loop via setTimeout(0).
-/// Unlike Promise.resolve() which runs as a microtask (and never lets GPU
-/// callbacks fire), setTimeout(0) yields to the macrotask queue, giving the
-/// browser time to process GPU work and fire map_async callbacks.
 async fn yield_to_browser() {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
         web_sys::window()
@@ -225,33 +68,26 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     let ptr = state_js.as_f64().unwrap() as usize;
     let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
 
-    // Stop the animation loop and drop the borrow before any await
     {
         let mut s = state.borrow_mut();
         s.running = false;
-        s.frames.reset();
         s.generation.set(s.generation.get() + 1);
     }
 
-    // Let the animation frame callback finish so it releases its borrow
     yield_to_browser().await;
     yield_to_browser().await;
 
-    // Now safe: animation loop has stopped, no concurrent borrows
     state.borrow().capture.start_with_device(device_id).await?;
 
-    // Detect resolution and rebuild if needed
     {
         let mut s = state.borrow_mut();
         let (cam_w, cam_h) = s.capture.actual_size();
-        let max_w = QUALITY_MAX_WIDTHS[s.quality as usize];
-        let (w, h) = processing_size(cam_w, cam_h, max_w);
+        let (w, h) = processing_size(cam_w, cam_h);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            let weights = ModelWeights::random();
-            s.model = MotionMagModel::new(&s.ctx, w, h, &weights);
+            s.evm = EvmPipeline::new(&s.ctx, w, h);
             s.renderer = OutputRenderer::new("output", w, h)?;
             s.width = w;
             s.height = h;
@@ -272,44 +108,39 @@ pub async fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).unwrap();
 
-    log::info!("Initializing WebGPU motion magnification...");
+    log::info!("Initializing EVM motion magnification...");
 
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
 
-    // Start camera first to detect resolution
-    let initial_max = QUALITY_MAX_WIDTHS[0];
-    let mut capture = VideoCapture::new(initial_max, initial_max * 3 / 4)?;
+    // Start camera to detect resolution
+    let mut capture = VideoCapture::new(MAX_WIDTH, MAX_WIDTH * 3 / 4)?;
     capture.start_with_device("").await?;
     let (cam_w, cam_h) = capture.actual_size();
-    let (w, h) = processing_size(cam_w, cam_h, initial_max);
+    let (w, h) = processing_size(cam_w, cam_h);
     log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
     capture.resize(w, h);
 
-    // Tell JS the aspect ratio
     let window = web_sys::window().unwrap();
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let weights = load_weights().await;
-    let model = MotionMagModel::new(&ctx, w, h, &weights);
-    log::info!("Model built: {}x{}, latent {}x{}", w, h, model.latent_width, model.latent_height);
+    let evm = EvmPipeline::new(&ctx, w, h);
+    log::info!("EVM pipeline ready: {}x{}", w, h);
 
     let renderer = OutputRenderer::new("output", w, h)?;
 
     let state = Rc::new(RefCell::new(AppState {
         ctx,
-        model,
+        evm,
         capture,
         renderer,
-        frames: FrameBuffers::new((w * h) as usize),
-        alpha: 20.0,
+        amplification: 20.0,
+        freq_low: 0.5,
+        freq_high: 3.0,
         running: true,
         width: w,
         height: h,
-        quality: 0,
-        avg_frame_time_ms: 0.0,
-        frame_index: 0,
         generation: Rc::new(Cell::new(0)),
     }));
 
@@ -318,66 +149,41 @@ pub async fn start() -> Result<(), JsValue> {
 
     wasm_bindgen_futures::spawn_local(run_loop(state.clone()));
 
-    let state_for_js = state.clone();
-    let set_alpha = Closure::wrap(Box::new(move |alpha: f32| {
-        state_for_js.borrow_mut().alpha = alpha;
+    // Expose controls to JS
+    let s1 = state.clone();
+    let set_amp = Closure::wrap(Box::new(move |v: f32| {
+        s1.borrow_mut().amplification = v;
     }) as Box<dyn FnMut(f32)>);
-    js_sys::Reflect::set(&window, &"setMagnification".into(), set_alpha.as_ref())?;
-    set_alpha.forget();
+    js_sys::Reflect::set(&window, &"setMagnification".into(), set_amp.as_ref())?;
+    set_amp.forget();
 
-    let state_for_toggle = state.clone();
+    let s2 = state.clone();
+    let set_freq_low = Closure::wrap(Box::new(move |v: f32| {
+        s2.borrow_mut().freq_low = v;
+    }) as Box<dyn FnMut(f32)>);
+    js_sys::Reflect::set(&window, &"setFreqLow".into(), set_freq_low.as_ref())?;
+    set_freq_low.forget();
+
+    let s3 = state.clone();
+    let set_freq_high = Closure::wrap(Box::new(move |v: f32| {
+        s3.borrow_mut().freq_high = v;
+    }) as Box<dyn FnMut(f32)>);
+    js_sys::Reflect::set(&window, &"setFreqHigh".into(), set_freq_high.as_ref())?;
+    set_freq_high.forget();
+
+    let s4 = state.clone();
     let toggle = Closure::wrap(Box::new(move || {
-        let mut s = state_for_toggle.borrow_mut();
+        let mut s = s4.borrow_mut();
         s.running = !s.running;
-        // run_loop polls s.running each frame, no restart needed
     }) as Box<dyn FnMut()>);
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
-    let state_for_quality = state.clone();
-    let set_quality = Closure::wrap(Box::new(move |level: u32| {
-        let level = level.min(QUALITY_MAX_WIDTHS.len() as u32 - 1);
-        let mut s = state_for_quality.borrow_mut();
-        if s.quality == level {
-            return;
-        }
-        s.quality = level;
-        let max_w = QUALITY_MAX_WIDTHS[level as usize];
-        let (cam_w, cam_h) = s.capture.actual_size();
-        let (w, h) = processing_size(cam_w, cam_h, max_w);
-        log::info!("Quality level {}: {}x{}", level, w, h);
-
-        if w != s.width || h != s.height {
-            s.capture.resize(w, h);
-            let weights = ModelWeights::random();
-            s.model = MotionMagModel::new(&s.ctx, w, h, &weights);
-            // Rebuild the renderer; if it fails, keep the old dimensions.
-            match OutputRenderer::new("output", w, h) {
-                Ok(r) => {
-                    s.renderer = r;
-                    s.width = w;
-                    s.height = h;
-                    s.frames.reset();
-                    // Reset frame-rate stats for the new resolution
-                    s.avg_frame_time_ms = 0.0;
-                    s.frame_index = 0;
-                }
-                Err(e) => {
-                    log::error!("Failed to rebuild renderer: {:?}", e);
-                }
-            }
-        }
-    }) as Box<dyn FnMut(u32)>);
-    js_sys::Reflect::set(&window, &"setQuality".into(), set_quality.as_ref())?;
-    set_quality.forget();
-
-    // Initialize __mamp_fps to 0
     js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(0.0))?;
 
     Ok(())
 }
 
-/// Wait for the next animation frame (async wrapper around requestAnimationFrame).
 async fn next_frame() {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         web_sys::window()
@@ -388,27 +194,21 @@ async fn next_frame() {
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
-/// Main async animation loop. All GPU readback is properly awaited.
-/// Key rule: never hold a RefCell borrow across an await point.
 async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut magnified_pixels: Vec<u32> = Vec::new();
     let mut has_magnified = false;
     let mut frame_count: u32 = 0;
     let mut last_fps_time = perf_now();
-    let mut frame_index: u64 = 0;
-    let mut avg_frame_time: f64 = 0.0;
     let mut frame: Vec<u32> = Vec::new();
-    let mut prev_buf: Vec<u32> = Vec::new();
-    let mut current_buf: Vec<u32> = Vec::new();
+    let mut avg_frame_time: f64 = 0.0;
+    let mut estimated_fps: f32 = 30.0;
 
-    // map_async readback state
     let map_ready = Rc::new(Cell::new(false));
     let mut map_pending = false;
-    let mut map_generation: u32 = 0; // generation when map_async was issued
+    let mut map_generation: u32 = 0;
 
     loop {
         next_frame().await;
-
         let t0 = perf_now();
 
         let running = state.borrow().running;
@@ -417,25 +217,22 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             continue;
         }
 
-        // If a previous map_async completed, read back the magnified pixels.
-        // Skip if generation changed (camera switch rebuilt the model/staging buffer).
+        // Check if previous readback completed
         let cur_gen = state.borrow().generation.get();
         if map_pending && map_ready.get() {
             if map_generation == cur_gen {
                 let s = state.borrow();
-                let view = s.model.buf_staging.slice(..).get_mapped_range();
+                let view = s.evm.buf_staging.slice(..).get_mapped_range();
                 let pixels: &[u32] = bytemuck::cast_slice(&view);
                 magnified_pixels.clear();
                 magnified_pixels.extend_from_slice(pixels);
                 has_magnified = true;
                 drop(view);
-                s.model.buf_staging.unmap();
+                s.evm.buf_staging.unmap();
             }
-            // Either way, clear the pending state
             map_pending = false;
             map_ready.set(false);
         } else if map_pending && map_generation != cur_gen {
-            // Generation changed while map was pending — discard
             map_pending = false;
             map_ready.set(false);
             has_magnified = false;
@@ -450,71 +247,51 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Store in double buffer
-        let (has_prev, alpha) = {
-            let mut s = state.borrow_mut();
-            s.frames.advance_index();
-            let idx = s.frames.current_idx();
-            s.frames.bufs[idx].clear();
-            s.frames.bufs[idx].extend_from_slice(&frame);
+        // Run EVM if no readback pending
+        if !map_pending {
+            let (amp, fl, fh) = {
+                let s = state.borrow();
+                (s.amplification, s.freq_low, s.freq_high)
+            };
 
-            prev_buf.clear();
-            if let Some(p) = s.frames.prev_frame() {
-                prev_buf.extend_from_slice(p);
+            {
+                let s = state.borrow();
+                s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
             }
-            current_buf.clear();
-            current_buf.extend_from_slice(s.frames.current_frame());
-            (!prev_buf.is_empty(), s.alpha)
-        };
 
-        // Run magnification if we have two frames and no pending readback
-        if has_prev && !map_pending {
-            let (run_count, period) = skip_policy(avg_frame_time);
-            let should_magnify = (frame_index % period) < run_count;
-
-            if should_magnify {
-                // Run neural net + copy to staging
-                {
-                    let s = state.borrow();
-                    s.model.magnify(&s.ctx, &prev_buf, &current_buf, alpha);
-                }
-
-                // Request map — callback fires when GPU finishes (next frame or later)
-                {
-                    let s = state.borrow();
-                    let flag = map_ready.clone();
-                    s.model.buf_staging.slice(..).map_async(
-                        wgpu::MapMode::Read,
-                        move |r| { if r.is_ok() { flag.set(true); } },
-                    );
-                }
-                map_pending = true;
-                map_generation = cur_gen;
+            // Request readback
+            {
+                let s = state.borrow();
+                let flag = map_ready.clone();
+                s.evm.buf_staging.slice(..).map_async(
+                    wgpu::MapMode::Read,
+                    move |r| { if r.is_ok() { flag.set(true); } },
+                );
             }
+            map_pending = true;
+            map_generation = cur_gen;
         }
 
-        // Display magnified frame if available, otherwise camera
+        // Display
         {
             let s = state.borrow();
             if has_magnified {
                 let _ = s.renderer.draw(&magnified_pixels);
             } else {
-                let _ = s.renderer.draw(&current_buf);
+                let _ = s.renderer.draw(&frame);
             }
         }
 
-        frame_index += 1;
-        let elapsed = perf_now() - t0;
-        avg_frame_time = if avg_frame_time == 0.0 {
-            elapsed
-        } else {
-            FRAME_TIME_ALPHA * elapsed + (1.0 - FRAME_TIME_ALPHA) * avg_frame_time
-        };
-
+        // FPS tracking
         frame_count += 1;
+        let elapsed = perf_now() - t0;
+        avg_frame_time = if avg_frame_time == 0.0 { elapsed }
+            else { FRAME_TIME_ALPHA * elapsed + (1.0 - FRAME_TIME_ALPHA) * avg_frame_time };
+
         let now = perf_now();
         if now - last_fps_time >= 1000.0 {
             let fps = (frame_count as f64 / (now - last_fps_time)) * 1000.0;
+            estimated_fps = fps as f32;
             frame_count = 0;
             last_fps_time = now;
             let window = web_sys::window().unwrap();

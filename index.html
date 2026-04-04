@@ -75,7 +75,7 @@
 </head>
 <body>
     <h1>Video Motion Magnification</h1>
-    <p class="subtitle">Ha et al. 2024 — WebGPU accelerated</p>
+    <p class="subtitle">Eulerian Video Magnification — WebGPU</p>
 
     <canvas id="output" width="480" height="360"></canvas>
 
@@ -83,15 +83,17 @@
         <label for="camera">Camera</label>
         <select id="camera"><option value="">Loading...</option></select>
 
-        <label for="alpha">&alpha;</label>
-        <input type="range" id="alpha" min="1" max="100" value="20" step="1">
-        <span id="alpha-val">20&times;</span>
-        <label for="quality">Quality</label>
-        <select id="quality">
-            <option value="0">Full (480p)</option>
-            <option value="1">Medium (320p)</option>
-            <option value="2">Low (240p)</option>
-        </select>
+        <label for="alpha">Amplify</label>
+        <input type="range" id="alpha" min="1" max="200" value="30" step="1">
+        <span id="alpha-val">30&times;</span>
+
+        <label for="freq-low">Low Hz</label>
+        <input type="range" id="freq-low" min="0.1" max="5" value="0.5" step="0.1">
+        <span id="freq-low-val">0.5</span>
+
+        <label for="freq-high">High Hz</label>
+        <input type="range" id="freq-high" min="0.5" max="30" value="3.0" step="0.5">
+        <span id="freq-high-val">3.0</span>
 
         <button id="toggle">Pause</button>
         <button id="copy-log">Copy Log</button>
@@ -188,7 +190,7 @@
                     }
                 });
 
-                // Alpha slider
+                // Amplification slider
                 const slider = document.getElementById('alpha');
                 const alphaVal = document.getElementById('alpha-val');
                 slider.addEventListener('input', () => {
@@ -197,11 +199,19 @@
                     if (window.setMagnification) window.setMagnification(v);
                 });
 
-                // Quality selector
-                document.getElementById('quality').addEventListener('change', (e) => {
-                    const level = parseInt(e.target.value, 10);
-                    dbg(`Setting quality level: ${level}`);
-                    if (window.setQuality) window.setQuality(level);
+                // Frequency sliders
+                const freqLow = document.getElementById('freq-low');
+                const freqLowVal = document.getElementById('freq-low-val');
+                freqLow.addEventListener('input', () => {
+                    freqLowVal.textContent = freqLow.value;
+                    if (window.setFreqLow) window.setFreqLow(parseFloat(freqLow.value));
+                });
+
+                const freqHigh = document.getElementById('freq-high');
+                const freqHighVal = document.getElementById('freq-high-val');
+                freqHigh.addEventListener('input', () => {
+                    freqHighVal.textContent = freqHigh.value;
+                    if (window.setFreqHigh) window.setFreqHigh(parseFloat(freqHigh.value));
                 });
 
                 // Pause/resume

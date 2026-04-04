@@ -135,33 +135,24 @@ async fn load_weights() -> ModelWeights {
         ("dec_conv3.bias", 3),
     ];
 
-    let mut loaded: Vec<Vec<f32>> = Vec::new();
-    let mut all_ok = true;
+    // Fetch all 14 weight files in parallel (one round-trip instead of 14)
+    let urls: Vec<String> = layer_specs.iter().map(|(name, _)| format!("weights/{}.bin", name)).collect();
+    let loaded = match weights::load_all_parallel(&urls).await {
+        Ok(data) => data,
+        Err(e) => {
+            log::warn!("Failed to load weights: {:?} — using random", e);
+            return ModelWeights::random();
+        }
+    };
 
-    for (name, expected_len) in layer_specs {
-        let url = format!("weights/{}.bin", name);
-        match weights::load_weight_file(&url).await {
-            Ok(data) if data.len() == *expected_len => {
-                log::info!("Loaded {}: {} floats", name, data.len());
-                loaded.push(data);
-            }
-            Ok(data) => {
-                log::warn!("{}: expected {} floats, got {} — using random", name, expected_len, data.len());
-                all_ok = false;
-                break;
-            }
-            Err(e) => {
-                log::warn!("Failed to load {}: {:?} — using random weights", name, e);
-                all_ok = false;
-                break;
-            }
+    // Validate sizes
+    for (i, (name, expected_len)) in layer_specs.iter().enumerate() {
+        if loaded[i].len() != *expected_len {
+            log::warn!("{}: expected {} floats, got {} — using random", name, expected_len, loaded[i].len());
+            return ModelWeights::random();
         }
     }
-
-    if !all_ok || loaded.len() != layer_specs.len() {
-        log::info!("Using random placeholder weights (train model with train.py)");
-        return ModelWeights::random();
-    }
+    log::info!("Loaded {} weight tensors in parallel", loaded.len());
 
     let mut it = loaded.into_iter();
     ModelWeights {

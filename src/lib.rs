@@ -96,6 +96,8 @@ struct AppState {
     quality: u32,
     avg_frame_time_ms: f64,
     frame_index: u64,
+    /// Incremented on camera switch / quality change to invalidate pending readbacks.
+    generation: Rc<Cell<u32>>,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -228,6 +230,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
         let mut s = state.borrow_mut();
         s.running = false;
         s.frames.reset();
+        s.generation.set(s.generation.get() + 1);
     }
 
     // Let the animation frame callback finish so it releases its borrow
@@ -307,6 +310,7 @@ pub async fn start() -> Result<(), JsValue> {
         quality: 0,
         avg_frame_time_ms: 0.0,
         frame_index: 0,
+        generation: Rc::new(Cell::new(0)),
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -397,9 +401,10 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut prev_buf: Vec<u32> = Vec::new();
     let mut current_buf: Vec<u32> = Vec::new();
 
-    // map_async readback state: flag set by callback, persists across frames
+    // map_async readback state
     let map_ready = Rc::new(Cell::new(false));
-    let mut map_pending = false; // true if we've called map_async and haven't read yet
+    let mut map_pending = false;
+    let mut map_generation: u32 = 0; // generation when map_async was issued
 
     loop {
         next_frame().await;
@@ -412,9 +417,11 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             continue;
         }
 
-        // If a previous map_async completed, read back the magnified pixels
+        // If a previous map_async completed, read back the magnified pixels.
+        // Skip if generation changed (camera switch rebuilt the model/staging buffer).
+        let cur_gen = state.borrow().generation.get();
         if map_pending && map_ready.get() {
-            {
+            if map_generation == cur_gen {
                 let s = state.borrow();
                 let view = s.model.buf_staging.slice(..).get_mapped_range();
                 let pixels: &[u32] = bytemuck::cast_slice(&view);
@@ -424,8 +431,14 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 drop(view);
                 s.model.buf_staging.unmap();
             }
+            // Either way, clear the pending state
             map_pending = false;
             map_ready.set(false);
+        } else if map_pending && map_generation != cur_gen {
+            // Generation changed while map was pending — discard
+            map_pending = false;
+            map_ready.set(false);
+            has_magnified = false;
         }
 
         // Grab camera frame
@@ -476,6 +489,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                     );
                 }
                 map_pending = true;
+                map_generation = cur_gen;
             }
         }
 

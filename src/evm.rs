@@ -393,9 +393,9 @@ impl EvmPipeline {
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // DEBUG: skip ALL compute, just clear to cyan (no draw call)
+        // Render: blit storage buffer to canvas
         {
-            let _pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("blit"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
@@ -411,6 +411,9 @@ impl EvmPipeline {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_pipeline(&self.render_pipeline);
+            pass.set_bind_group(0, Some(&self.blit_bg), &[]);
+            pass.draw(0..6, 0..1);
         }
 
         ctx.queue.submit(std::iter::once(encoder.finish()));

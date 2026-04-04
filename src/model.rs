@@ -274,6 +274,7 @@ impl MotionMagModel {
     /// All intermediate buffers, uniform buffers, and bind groups are pre-allocated
     /// so that `magnify()` performs zero GPU allocations per frame.
     pub fn new(ctx: &GpuContext, w: u32, h: u32, weights: &ModelWeights) -> Self {
+        assert!(w % 2 == 0 && h % 2 == 0, "Input dimensions must be even (got {}x{})", w, h);
         let lw = w / 2;
         let lh = h / 2;
 

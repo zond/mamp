@@ -106,11 +106,10 @@ impl EvmPipeline {
             level_h[i] = level_h[i - 1] / 2;
         }
 
-        let s = BufferUsages::STORAGE;
-        let scd = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+        let s = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
         let pixels = (w * h) as u64;
 
-        let buf_frame_rgba = ctx.create_buffer("evm_frame", pixels * 4, scd);
+        let buf_frame_rgba = ctx.create_buffer("evm_frame", pixels * 4, s);
         let buf_output_rgba = ctx.create_buffer("evm_out", pixels * 4,
             BufferUsages::STORAGE | BufferUsages::COPY_DST);
 
@@ -400,7 +399,7 @@ impl EvmPipeline {
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // ── Compute: EVM pipeline ──
+        // ── EVM Compute Pipeline ──
 
         // RGBA → CHW
         Self::dispatch(&mut encoder, "r2c",

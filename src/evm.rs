@@ -393,48 +393,12 @@ impl EvmPipeline {
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // ── Compute: EVM pipeline ──
-
-        // RGBA → CHW
-        Self::dispatch(&mut encoder, "r2c",
-            &self.rgba_to_chw_pipeline, &self.rgba_to_chw_bg,
-            GpuContext::div_ceil(self.width, 64),
-            GpuContext::div_ceil(self.height, 16), 1);
-
-        // Gaussian pyramid
-        for i in 0..(N_LEVELS - 1) {
-            Self::dispatch(&mut encoder, "ds",
-                &self.downsample_pipeline, &self.downsample_bgs[i],
-                GpuContext::div_ceil(self.level_w[i + 1], 16),
-                GpuContext::div_ceil(self.level_h[i + 1], 16), 1);
-        }
-
-        // Laplacian + temporal bandpass
-        for i in 0..N_LEVELS {
-            Self::dispatch(&mut encoder, "lt",
-                &self.laplacian_temporal_pipeline, &self.laplacian_temporal_bgs[i],
-                GpuContext::div_ceil(self.level_w[i], 16),
-                GpuContext::div_ceil(self.level_h[i], 16), 1);
-        }
-
-        // Reconstruct pyramid
+        // DEBUG: just copy input RGBA straight to output (skip all EVM)
         encoder.copy_buffer_to_buffer(
-            &self.amplified[N_LEVELS - 1], 0,
-            &self.recon[N_LEVELS - 1], 0,
-            3 * (self.level_w[N_LEVELS - 1] as u64) * (self.level_h[N_LEVELS - 1] as u64) * 4,
+            &self.buf_frame_rgba, 0,
+            &self.buf_output_rgba, 0,
+            (self.width * self.height * 4) as u64,
         );
-        for i in (0..(N_LEVELS - 1)).rev() {
-            Self::dispatch(&mut encoder, "ua",
-                &self.upsample_add_pipeline, &self.upsample_add_bgs[i],
-                GpuContext::div_ceil(self.level_w[i], 16),
-                GpuContext::div_ceil(self.level_h[i], 16), 1);
-        }
-
-        // CHW → RGBA
-        Self::dispatch(&mut encoder, "c2r",
-            &self.chw_to_rgba_pipeline, &self.chw_to_rgba_bg,
-            GpuContext::div_ceil(self.width, 64),
-            GpuContext::div_ceil(self.height, 16), 1);
 
         // ── Render: blit to canvas ──
         {

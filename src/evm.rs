@@ -393,58 +393,15 @@ impl EvmPipeline {
             &CommandEncoderDescriptor { label: Some("evm") },
         );
 
-        // ── Compute: EVM pipeline ──
-
-        // RGBA → CHW
-        Self::dispatch(&mut encoder, "r2c",
-            &self.rgba_to_chw_pipeline, &self.rgba_to_chw_bg,
-            GpuContext::div_ceil(self.width, 64),
-            GpuContext::div_ceil(self.height, 16), 1);
-
-        // Gaussian pyramid
-        for i in 0..(N_LEVELS - 1) {
-            Self::dispatch(&mut encoder, "ds",
-                &self.downsample_pipeline, &self.downsample_bgs[i],
-                GpuContext::div_ceil(self.level_w[i + 1], 16),
-                GpuContext::div_ceil(self.level_h[i + 1], 16), 1);
-        }
-
-        // Laplacian + temporal bandpass
-        for i in 0..N_LEVELS {
-            Self::dispatch(&mut encoder, "lt",
-                &self.laplacian_temporal_pipeline, &self.laplacian_temporal_bgs[i],
-                GpuContext::div_ceil(self.level_w[i], 16),
-                GpuContext::div_ceil(self.level_h[i], 16), 1);
-        }
-
-        // Reconstruct pyramid
-        encoder.copy_buffer_to_buffer(
-            &self.amplified[N_LEVELS - 1], 0,
-            &self.recon[N_LEVELS - 1], 0,
-            3 * (self.level_w[N_LEVELS - 1] as u64) * (self.level_h[N_LEVELS - 1] as u64) * 4,
-        );
-        for i in (0..(N_LEVELS - 1)).rev() {
-            Self::dispatch(&mut encoder, "ua",
-                &self.upsample_add_pipeline, &self.upsample_add_bgs[i],
-                GpuContext::div_ceil(self.level_w[i], 16),
-                GpuContext::div_ceil(self.level_h[i], 16), 1);
-        }
-
-        // CHW → RGBA
-        Self::dispatch(&mut encoder, "c2r",
-            &self.chw_to_rgba_pipeline, &self.chw_to_rgba_bg,
-            GpuContext::div_ceil(self.width, 64),
-            GpuContext::div_ceil(self.height, 16), 1);
-
-        // ── Render: blit to canvas ──
+        // DEBUG: skip ALL compute, just clear to cyan (no draw call)
         {
-            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            let _pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("blit"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
+                        load: LoadOp::Clear(Color { r: 0.0, g: 1.0, b: 1.0, a: 1.0 }),
                         store: StoreOp::Store,
                     },
                     depth_slice: None,
@@ -454,9 +411,6 @@ impl EvmPipeline {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.render_pipeline);
-            pass.set_bind_group(0, Some(&self.blit_bg), &[]);
-            pass.draw(0..6, 0..1);
         }
 
         ctx.queue.submit(std::iter::once(encoder.finish()));

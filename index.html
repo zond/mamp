@@ -188,6 +188,11 @@
                 dbg('Calling WASM default()...');
                 await wasm.default();
                 dbg('WASM initialized.');
+                // Check canvas context
+                const c = document.getElementById('output');
+                dbg(`Canvas size: ${c.width}x${c.height}, clientSize: ${c.clientWidth}x${c.clientHeight}`);
+                const gpuCtx = c.getContext('webgpu');
+                dbg(`WebGPU context: ${gpuCtx ? 'exists' : 'NULL'}`);
 
                 // Set canvas aspect from detected camera resolution
                 if (window.__mamp_aspect) {

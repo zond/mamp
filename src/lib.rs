@@ -249,7 +249,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Run EVM + request readback (only if no pending readback)
+        // Run EVM + readback (only if no pending readback)
         if !map_pending {
             let (amp, fl, fh) = {
                 let s = state.borrow();
@@ -270,6 +270,27 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 );
             }
             map_pending = true;
+
+            // Yield to browser macrotask queue so GPU callbacks can fire.
+            // requestAnimationFrame runs in the rendering pipeline, not as a
+            // regular macrotask, so GPU map callbacks may not fire between
+            // RAF callbacks. This setTimeout(0) gives the browser a chance.
+            yield_to_browser().await;
+
+            // Check if it's ready now (often resolves after one yield)
+            if map_ready.get() {
+                if let Ok(s) = state.try_borrow() {
+                    let view = s.evm.buf_staging.slice(..).get_mapped_range();
+                    let pixels: &[u32] = bytemuck::cast_slice(&view);
+                    magnified_pixels.clear();
+                    magnified_pixels.extend_from_slice(pixels);
+                    has_magnified = true;
+                    drop(view);
+                    s.evm.buf_staging.unmap();
+                }
+                map_pending = false;
+                map_ready.set(false);
+            }
         }
 
         // Always show the latest camera frame, overlay magnified when available

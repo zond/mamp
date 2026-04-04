@@ -72,19 +72,28 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     let ptr = state_js.as_f64().unwrap() as usize;
     let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
 
-    {
-        let mut s = state.borrow_mut();
-        s.running = false;
-    }
-    // Wait until run_loop actually yields (it checks running each frame).
-    // Need enough yields for the current frame to finish processing.
-    for _ in 0..10 {
+    // Signal the run_loop to stop, then wait until it's not borrowing state
+    loop {
+        if let Ok(mut s) = state.try_borrow_mut() {
+            s.running = false;
+            break;
+        }
         yield_to_browser().await;
-        if state.try_borrow().is_ok() { break; }
     }
 
-    state.borrow().capture.start_with_device(device_id).await?;
+    // Wait for run_loop to see running=false and release its borrow
+    loop {
+        yield_to_browser().await;
+        // try_borrow_mut succeeds only when run_loop has no borrow at all
+        if state.try_borrow_mut().is_ok() { break; }
+    }
 
+    {
+        let s = state.borrow();
+        s.capture.start_with_device(device_id).await?;
+    }
+
+    // Now safe to take exclusive borrow
     {
         let mut s = state.borrow_mut();
         let (cam_w, cam_h) = s.capture.actual_size();

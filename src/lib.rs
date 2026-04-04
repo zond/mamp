@@ -453,26 +453,21 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     dest.clear();
     dest.extend_from_slice(&frame);
 
-    // Check if previous map_async completed — read back magnified pixels
+    // Read back magnified pixels if the previous map_async completed.
+    // Must unmap BEFORE calling magnify() which writes to the staging buffer.
     if s.mapping_pending.get() {
-        let staging = &s.model.buf_staging;
-        let slice = staging.slice(..);
-        // Try to read the mapped data
-        if let Ok(data) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let view = slice.get_mapped_range();
+        {
+            let view = s.model.buf_staging.slice(..).get_mapped_range();
             let pixels: &[u32] = bytemuck::cast_slice(&view);
-            let result = pixels.to_vec();
-            drop(view);
-            staging.unmap();
-            result
-        })) {
-            s.magnified_pixels = data;
+            s.magnified_pixels.clear();
+            s.magnified_pixels.extend_from_slice(pixels);
             s.has_magnified = true;
-        }
+        } // view dropped here, releasing the borrow on buf_staging
+        s.model.buf_staging.unmap();
         s.mapping_pending.set(false);
     }
 
-    // If we have a previous frame, run magnification
+    // Run magnification if we have two frames and staging is free
     if let Some(prev) = s.frames.prev_frame() {
         let (run_count, period) = skip_policy(s.avg_frame_time_ms);
         let should_magnify = (s.frame_index % period) < run_count;
@@ -481,7 +476,7 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
             let current = s.frames.current_frame();
             s.model.magnify(&s.ctx, prev, current, s.alpha);
 
-            // Kick off async map of staging buffer
+            // Request async mapping of the staging buffer
             let pending = s.mapping_pending.clone();
             s.model.buf_staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
                 if result.is_ok() {
@@ -491,7 +486,7 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
         }
     }
 
-    // Display: magnified output if available, otherwise raw camera
+    // Display magnified frame if available, otherwise raw camera
     if s.has_magnified {
         let _ = s.renderer.draw(&s.magnified_pixels);
     } else {

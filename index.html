@@ -14,7 +14,9 @@
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
-            padding: 2rem;
+            padding: 0.5rem;
+            max-width: 800px;
+            margin: 0 auto;
         }
         h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.5rem; color: #fff; }
         .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
@@ -22,11 +24,12 @@
             border: 1px solid #333;
             border-radius: 8px;
             background: #111;
-            max-width: 90vw;
-            max-height: 70vh;
+            width: 100%;
+            max-width: 100%;
         }
         .controls {
-            margin-top: 1rem;
+            margin-top: 0.75rem;
+            width: 100%;
             display: flex;
             align-items: center;
             gap: 0.75rem;
@@ -37,9 +40,12 @@
             display: flex;
             align-items: center;
             gap: 0.3rem;
+            flex: 1;
+            min-width: 0;
         }
+        .slider-group input[type="range"] { flex: 1; min-width: 0; }
         label { font-size: 0.9rem; color: #aaa; white-space: nowrap; }
-        input[type="range"] { width: 100px; accent-color: #6c5ce7; }
+        input[type="range"] { accent-color: #6c5ce7; }
         #alpha-val {
             font-variant-numeric: tabular-nums;
             min-width: 3ch;

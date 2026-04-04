@@ -412,22 +412,24 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut last_fps_time = perf_now();
     let mut frame_index: u64 = 0;
     let mut avg_frame_time: f64 = 0.0;
+    // Reusable buffers to avoid per-frame allocation churn
+    let mut frame: Vec<u32> = Vec::new();
+    let mut prev_buf: Vec<u32> = Vec::new();
+    let mut current_buf: Vec<u32> = Vec::new();
 
     loop {
         next_frame().await;
 
         let t0 = perf_now();
 
-        // Check if still running
         let running = state.borrow().running;
         if !running {
-            // Yield and re-check
             yield_to_browser().await;
             continue;
         }
 
-        // Grab camera frame into a local buffer (brief borrow)
-        let mut frame: Vec<u32> = Vec::new();
+        // Grab camera frame (brief borrow, reuses frame buffer)
+        frame.clear();
         {
             let s = state.borrow();
             if s.capture.grab_frame_into(&mut frame).is_err() {
@@ -435,23 +437,25 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Store in double buffer (brief mut borrow)
-        let (has_prev, prev_frame, current_frame, alpha) = {
+        // Store in double buffer, extract copies for GPU (brief mut borrow)
+        let (has_prev, alpha) = {
             let mut s = state.borrow_mut();
             s.frames.advance_index();
             let idx = s.frames.current_idx();
             s.frames.bufs[idx].clear();
             s.frames.bufs[idx].extend_from_slice(&frame);
 
-            let prev = s.frames.prev_frame().map(|p| p.to_vec());
-            let current = s.frames.current_frame().to_vec();
-            let alpha = s.alpha;
-            (prev.is_some(), prev, current, alpha)
+            prev_buf.clear();
+            if let Some(p) = s.frames.prev_frame() {
+                prev_buf.extend_from_slice(p);
+            }
+            current_buf.clear();
+            current_buf.extend_from_slice(s.frames.current_frame());
+            (!prev_buf.is_empty(), s.alpha)
         };
 
         // Run magnification + async readback if we have two frames
         if has_prev {
-            let prev = prev_frame.unwrap();
             let (run_count, period) = skip_policy(avg_frame_time);
             let should_magnify = (frame_index % period) < run_count;
 
@@ -459,7 +463,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 // Run the neural net + copy to staging (brief borrow)
                 {
                     let s = state.borrow();
-                    s.model.magnify(&s.ctx, &prev, &current_frame, alpha, 0);
+                    s.model.magnify(&s.ctx, &prev_buf, &current_buf, alpha, 0);
                 }
                 // Borrow dropped — now do async readback safely
 
@@ -480,8 +484,11 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                     polls += 1;
                 }
                 if !map_ready.get() {
-                    // Timed out — skip readback this frame
+                    // Timed out — must unmap to avoid corrupted buffer state
                     log::warn!("map_async timed out after {} polls", polls);
+                    let s = state.borrow();
+                    s.model.buf_staging[0].unmap();
+                    drop(s);
                     frame_index += 1;
                     continue;
                 }
@@ -506,7 +513,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             if has_magnified {
                 let _ = s.renderer.draw(&magnified_pixels);
             } else {
-                let _ = s.renderer.draw(&current_frame);
+                let _ = s.renderer.draw(&current_buf);
             }
         }
 

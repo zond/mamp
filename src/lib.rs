@@ -204,9 +204,9 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut avg_frame_time: f64 = 0.0;
     let mut estimated_fps: f32 = 30.0;
 
-    let map_ready = Rc::new(Cell::new(false));
+    // Each map_async gets its own flag. Old callbacks write to dead Rc instances.
+    let mut map_ready: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let mut map_pending = false;
-    let mut map_generation: u32 = 0;
 
     loop {
         next_frame().await;
@@ -214,29 +214,26 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
 
         let running = state.borrow().running;
         if !running {
+            // Generation may have changed (camera switch). Discard any pending readback.
+            if map_pending {
+                map_pending = false;
+                has_magnified = false;
+            }
             yield_to_browser().await;
             continue;
         }
 
         // Check if previous readback completed
-        let cur_gen = state.borrow().generation.get();
         if map_pending && map_ready.get() {
-            if map_generation == cur_gen {
-                let s = state.borrow();
-                let view = s.evm.buf_staging.slice(..).get_mapped_range();
-                let pixels: &[u32] = bytemuck::cast_slice(&view);
-                magnified_pixels.clear();
-                magnified_pixels.extend_from_slice(pixels);
-                has_magnified = true;
-                drop(view);
-                s.evm.buf_staging.unmap();
-            }
+            let s = state.borrow();
+            let view = s.evm.buf_staging.slice(..).get_mapped_range();
+            let pixels: &[u32] = bytemuck::cast_slice(&view);
+            magnified_pixels.clear();
+            magnified_pixels.extend_from_slice(pixels);
+            has_magnified = true;
+            drop(view);
+            s.evm.buf_staging.unmap();
             map_pending = false;
-            map_ready.set(false);
-        } else if map_pending && map_generation != cur_gen {
-            map_pending = false;
-            map_ready.set(false);
-            has_magnified = false;
         }
 
         // Grab camera frame
@@ -260,7 +257,8 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
             }
 
-            // Request readback
+            // Request readback with a FRESH flag (old callbacks write to dead Rc)
+            map_ready = Rc::new(Cell::new(false));
             {
                 let s = state.borrow();
                 let flag = map_ready.clone();
@@ -270,7 +268,6 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 );
             }
             map_pending = true;
-            map_generation = cur_gen;
         }
 
         // Display

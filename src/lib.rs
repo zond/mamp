@@ -271,13 +271,12 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
             map_pending = true;
 
-            // Yield to browser macrotask queue so GPU callbacks can fire.
-            // requestAnimationFrame runs in the rendering pipeline, not as a
-            // regular macrotask, so GPU map callbacks may not fire between
-            // RAF callbacks. This setTimeout(0) gives the browser a chance.
-            yield_to_browser().await;
+            // Yield multiple times to give GPU callbacks a chance to fire.
+            for _ in 0..3 {
+                yield_to_browser().await;
+                if map_ready.get() { break; }
+            }
 
-            // Check if it's ready now (often resolves after one yield)
             if map_ready.get() {
                 if let Ok(s) = state.try_borrow() {
                     let view = s.evm.buf_staging.slice(..).get_mapped_range();
@@ -290,6 +289,13 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 }
                 map_pending = false;
                 map_ready.set(false);
+            } else {
+                // Timed out — unmap (cancels pending map) so we can retry next frame
+                log::warn!("map_async not ready after 3 yields, retrying");
+                if let Ok(s) = state.try_borrow() {
+                    s.evm.buf_staging.unmap();
+                }
+                map_pending = false;
             }
         }
 

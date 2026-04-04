@@ -7,7 +7,7 @@ mod model;
 mod video;
 mod weights;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -107,14 +107,17 @@ struct AppState {
     running: bool,
     width: u32,
     height: u32,
-    // Quality level: 0=480, 1=320, 2=240
     quality: u32,
-    // Adaptive frame rate management
     avg_frame_time_ms: f64,
     frame_index: u64,
-    // FPS counter (updates once per second)
     fps_frame_count: u32,
     fps_last_update: f64,
+    /// Last magnified frame read back from GPU (displayed while next frame processes).
+    magnified_pixels: Vec<u32>,
+    /// True while a map_async is in-flight on buf_staging.
+    mapping_pending: Rc<Cell<bool>>,
+    /// True once we have at least one magnified frame to display.
+    has_magnified: bool,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -321,6 +324,9 @@ pub async fn start() -> Result<(), JsValue> {
         frame_index: 0,
         fps_frame_count: 0,
         fps_last_update: now,
+        magnified_pixels: vec![0u32; (w * h) as usize],
+        mapping_pending: Rc::new(Cell::new(false)),
+        has_magnified: false,
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -447,15 +453,48 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     dest.clear();
     dest.extend_from_slice(&frame);
 
-    // If we have a previous frame, run magnification and render.
+    // Check if previous map_async completed — read back magnified pixels
+    if s.mapping_pending.get() {
+        let staging = &s.model.buf_staging;
+        let slice = staging.slice(..);
+        // Try to read the mapped data
+        if let Ok(data) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let view = slice.get_mapped_range();
+            let pixels: &[u32] = bytemuck::cast_slice(&view);
+            let result = pixels.to_vec();
+            drop(view);
+            staging.unmap();
+            result
+        })) {
+            s.magnified_pixels = data;
+            s.has_magnified = true;
+        }
+        s.mapping_pending.set(false);
+    }
+
+    // If we have a previous frame, run magnification
     if let Some(prev) = s.frames.prev_frame() {
         let (run_count, period) = skip_policy(s.avg_frame_time_ms);
         let should_magnify = (s.frame_index % period) < run_count;
 
-        if should_magnify {
+        if should_magnify && !s.mapping_pending.get() {
             let current = s.frames.current_frame();
             s.model.magnify(&s.ctx, prev, current, s.alpha);
+
+            // Kick off async map of staging buffer
+            let pending = s.mapping_pending.clone();
+            s.model.buf_staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_ok() {
+                    pending.set(true);
+                }
+            });
         }
+    }
+
+    // Display: magnified output if available, otherwise raw camera
+    if s.has_magnified {
+        let _ = s.renderer.draw(&s.magnified_pixels);
+    } else {
         let _ = s.renderer.draw(s.frames.current_frame());
     }
 

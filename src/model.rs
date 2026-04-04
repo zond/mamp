@@ -210,7 +210,7 @@ pub struct MotionMagModel {
     buf_dec2: Buffer,
     buf_chw_out: Buffer,
     buf_rgba_out: Buffer,
-    buf_staging: Buffer,
+    pub buf_staging: Buffer,
 
     // Pre-allocated uniform buffers (avoid per-frame GPU allocation)
     frame_param_buf: Buffer,       // shared FrameParams uniform (width/height are fixed)

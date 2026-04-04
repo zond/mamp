@@ -21,14 +21,27 @@ impl GpuContext {
         let instance = Instance::new(desc);
 
         log::info!("Requesting WebGPU adapter...");
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await
-            .expect("No WebGPU adapter found — is WebGPU enabled in your browser?");
+        {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("High-performance adapter failed: {:?}, trying low power...", e);
+                instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await
+                    .expect("No WebGPU adapter found. Try Chrome with --enable-unsafe-webgpu or chrome://flags/#enable-webgpu-developer-features")
+            }
+        };
 
         log::info!("Adapter: {:?}", adapter.get_info());
 

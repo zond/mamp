@@ -60,7 +60,6 @@ pub struct FrameParams {
 // ── Conv2D layer on GPU ──────────────────────────────────────────────────────
 
 pub struct ConvLayer {
-    pub params: ConvParams,
     pub pipeline: ComputePipeline,
     pub weight_buf: Buffer,
     pub bias_buf: Buffer,
@@ -118,7 +117,6 @@ impl ConvLayer {
         });
 
         Self {
-            params,
             pipeline,
             weight_buf,
             bias_buf,

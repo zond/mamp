@@ -22,8 +22,8 @@ use web_sys::{Request, RequestInit, Response};
 pub async fn load_weight_file(url: &str) -> Result<Vec<f32>, JsValue> {
     let window = web_sys::window().unwrap();
 
-    let mut opts = RequestInit::new();
-    opts.method("GET");
+    let opts = RequestInit::new();
+    opts.set_method("GET");
 
     let request = Request::new_with_str_and_init(url, &opts)?;
 
@@ -56,51 +56,3 @@ pub async fn load_weight_file(url: &str) -> Result<Vec<f32>, JsValue> {
     Ok(floats)
 }
 
-/// Weight manifest: maps layer names to their expected shapes.
-/// Use this to validate loaded weights match the architecture.
-pub struct WeightManifest {
-    pub entries: Vec<(&'static str, Vec<usize>)>,
-}
-
-impl WeightManifest {
-    /// Manifest for the Ha et al. efficient architecture.
-    pub fn ha2024() -> Self {
-        Self {
-            entries: vec![
-                // Encoder
-                ("enc_conv1.weight", vec![16, 3, 3, 3]),
-                ("enc_conv1.bias", vec![16]),
-                ("enc_conv2.weight", vec![32, 16, 3, 3]),
-                ("enc_conv2.bias", vec![32]),
-                ("enc_conv3.weight", vec![32, 32, 3, 3]),
-                ("enc_conv3.bias", vec![32]),
-                ("enc_texture.weight", vec![32, 32, 1, 1]),
-                ("enc_texture.bias", vec![32]),
-                // Decoder
-                ("dec_conv1.weight", vec![32, 32, 3, 3]),
-                ("dec_conv1.bias", vec![32]),
-                ("dec_conv2.weight", vec![16, 32, 3, 3]),
-                ("dec_conv2.bias", vec![16]),
-                ("dec_conv3.weight", vec![3, 16, 3, 3]),
-                ("dec_conv3.bias", vec![3]),
-            ],
-        }
-    }
-
-    /// Validate that a weight vector has the expected number of elements.
-    pub fn validate(&self, name: &str, data: &[f32]) -> Result<(), String> {
-        for (n, shape) in &self.entries {
-            if *n == name {
-                let expected: usize = shape.iter().product();
-                if data.len() != expected {
-                    return Err(format!(
-                        "{}: expected {} elements ({:?}), got {}",
-                        name, expected, shape, data.len()
-                    ));
-                }
-                return Ok(());
-            }
-        }
-        Err(format!("Unknown weight: {}", name))
-    }
-}

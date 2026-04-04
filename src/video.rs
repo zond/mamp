@@ -10,7 +10,7 @@ use web_sys::{
 /// Manages camera capture and frame extraction.
 pub struct VideoCapture {
     video: HtmlVideoElement,
-    canvas: HtmlCanvasElement,
+    _canvas: HtmlCanvasElement,
     ctx2d: CanvasRenderingContext2d,
     pub width: u32,
     pub height: u32,
@@ -46,7 +46,7 @@ impl VideoCapture {
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 
-        Ok(Self { video, canvas, ctx2d, width, height })
+        Ok(Self { video, _canvas: canvas, ctx2d, width, height })
     }
 
     /// Request camera access and start the stream.
@@ -55,7 +55,7 @@ impl VideoCapture {
         let navigator = window.navigator();
         let media_devices = navigator.media_devices()?;
 
-        let mut constraints = MediaStreamConstraints::new();
+        let constraints = MediaStreamConstraints::new();
         // Build video constraints with resolution
         let video_constraints = js_sys::Object::new();
         js_sys::Reflect::set(
@@ -68,8 +68,8 @@ impl VideoCapture {
             &"height".into(),
             &JsValue::from(self.height),
         )?;
-        constraints.video(&video_constraints.into());
-        constraints.audio(&JsValue::FALSE);
+        constraints.set_video(&video_constraints.into());
+        constraints.set_audio(&JsValue::FALSE);
 
         let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
         let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
@@ -119,7 +119,7 @@ impl VideoCapture {
 
 /// Render output: write RGBA u32 data to a visible canvas.
 pub struct OutputRenderer {
-    canvas: HtmlCanvasElement,
+    _canvas: HtmlCanvasElement,
     ctx2d: CanvasRenderingContext2d,
     width: u32,
     height: u32,
@@ -140,7 +140,7 @@ impl OutputRenderer {
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 
-        Ok(Self { canvas, ctx2d, width, height })
+        Ok(Self { _canvas: canvas, ctx2d, width, height })
     }
 
     /// Blit packed RGBA u32 pixels onto the canvas.

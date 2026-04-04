@@ -363,7 +363,9 @@ impl EvmPipeline {
         }
 
         // Get surface texture for this frame
-        let frame_tex = match ctx.surface.get_current_texture() {
+        let tex_result = ctx.surface.get_current_texture();
+        log::info!("Surface texture: {:?}", std::mem::discriminant(&tex_result));
+        let frame_tex = match tex_result {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
                 log::error!("Surface texture unavailable: {:?}", other);
@@ -444,6 +446,7 @@ impl EvmPipeline {
 
         ctx.queue.submit(std::iter::once(encoder.finish()));
         frame_tex.present();
+        log::info!("Frame presented");
     }
 
     fn dispatch(

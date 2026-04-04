@@ -393,10 +393,13 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut last_fps_time = perf_now();
     let mut frame_index: u64 = 0;
     let mut avg_frame_time: f64 = 0.0;
-    // Reusable buffers to avoid per-frame allocation churn
     let mut frame: Vec<u32> = Vec::new();
     let mut prev_buf: Vec<u32> = Vec::new();
     let mut current_buf: Vec<u32> = Vec::new();
+
+    // map_async readback state: flag set by callback, persists across frames
+    let map_ready = Rc::new(Cell::new(false));
+    let mut map_pending = false; // true if we've called map_async and haven't read yet
 
     loop {
         next_frame().await;
@@ -409,7 +412,23 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             continue;
         }
 
-        // Grab camera frame (brief borrow, reuses frame buffer)
+        // If a previous map_async completed, read back the magnified pixels
+        if map_pending && map_ready.get() {
+            {
+                let s = state.borrow();
+                let view = s.model.buf_staging.slice(..).get_mapped_range();
+                let pixels: &[u32] = bytemuck::cast_slice(&view);
+                magnified_pixels.clear();
+                magnified_pixels.extend_from_slice(pixels);
+                has_magnified = true;
+                drop(view);
+                s.model.buf_staging.unmap();
+            }
+            map_pending = false;
+            map_ready.set(false);
+        }
+
+        // Grab camera frame
         frame.clear();
         {
             let s = state.borrow();
@@ -418,7 +437,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Store in double buffer, extract copies for GPU (brief mut borrow)
+        // Store in double buffer
         let (has_prev, alpha) = {
             let mut s = state.borrow_mut();
             s.frames.advance_index();
@@ -435,21 +454,19 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             (!prev_buf.is_empty(), s.alpha)
         };
 
-        // Run magnification + async readback if we have two frames
-        if has_prev {
+        // Run magnification if we have two frames and no pending readback
+        if has_prev && !map_pending {
             let (run_count, period) = skip_policy(avg_frame_time);
             let should_magnify = (frame_index % period) < run_count;
 
             if should_magnify {
-                // Run the neural net + copy to staging (brief borrow)
+                // Run neural net + copy to staging
                 {
                     let s = state.borrow();
                     s.model.magnify(&s.ctx, &prev_buf, &current_buf, alpha);
                 }
-                // Borrow dropped — now do async readback safely
 
-                // Signal map_async via Rc<Cell<bool>>
-                let map_ready = Rc::new(Cell::new(false));
+                // Request map — callback fires when GPU finishes (next frame or later)
                 {
                     let s = state.borrow();
                     let flag = map_ready.clone();
@@ -458,37 +475,11 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                         move |r| { if r.is_ok() { flag.set(true); } },
                     );
                 }
-                // Borrow dropped — poll until map completes (with timeout)
-                let mut polls = 0;
-                while !map_ready.get() && polls < 60 {
-                    yield_to_browser().await;
-                    polls += 1;
-                }
-                if !map_ready.get() {
-                    // Timed out — must unmap to avoid corrupted buffer state
-                    log::warn!("map_async timed out after {} polls", polls);
-                    let s = state.borrow();
-                    s.model.buf_staging.unmap();
-                    drop(s);
-                    frame_index += 1;
-                    continue;
-                }
-
-                // Buffer is mapped — read pixels (brief borrow)
-                {
-                    let s = state.borrow();
-                    let view = s.model.buf_staging.slice(..).get_mapped_range();
-                    let pixels: &[u32] = bytemuck::cast_slice(&view);
-                    magnified_pixels.clear();
-                    magnified_pixels.extend_from_slice(pixels);
-                    has_magnified = true;
-                    drop(view);
-                    s.model.buf_staging.unmap();
-                }
+                map_pending = true;
             }
         }
 
-        // Display (brief borrow)
+        // Display magnified frame if available, otherwise camera
         {
             let s = state.borrow();
             if has_magnified {
@@ -498,7 +489,6 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // FPS tracking (no borrow needed)
         frame_index += 1;
         let elapsed = perf_now() - t0;
         avg_frame_time = if avg_frame_time == 0.0 {

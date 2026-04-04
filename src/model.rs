@@ -350,10 +350,11 @@ impl MotionMagModel {
         let latent_pixels = (lw * lh) as u64;
         let s = BufferUsages::STORAGE;
         let sc = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+        let scd = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
 
         // Allocate all intermediate buffers
-        let buf_frame_a = ctx.create_buffer("frame_a", pixels * 4, sc);
-        let buf_frame_b = ctx.create_buffer("frame_b", pixels * 4, sc);
+        let buf_frame_a = ctx.create_buffer("frame_a", pixels * 4, scd);
+        let buf_frame_b = ctx.create_buffer("frame_b", pixels * 4, scd);
         let buf_chw_a = ctx.create_buffer("chw_a", 3 * pixels * 4, s);
         let buf_chw_b = ctx.create_buffer("chw_b", 3 * pixels * 4, s);
         let buf_enc1_a = ctx.create_buffer("enc1_a", 16 * pixels * 4, s);

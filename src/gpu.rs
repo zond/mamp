@@ -6,6 +6,7 @@ use wgpu::*;
 
 pub struct GpuContext {
     pub instance: Instance,
+    pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
     pub surface: Surface<'static>,
@@ -20,11 +21,23 @@ impl GpuContext {
         desc.backends = Backends::BROWSER_WEBGPU;
         let instance = Instance::new(desc);
 
-        log::info!("Requesting WebGPU adapter...");
+        // Create surface FIRST — the adapter must be requested with
+        // compatible_surface so that wgpu picks an adapter that can actually
+        // present to this canvas.  Without this, get_capabilities() may
+        // return empty formats on some devices (especially mobile Chrome on
+        // Android) and rendering silently produces a black canvas.
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
+            .document().unwrap()
+            .get_element_by_id("output").unwrap()
+            .dyn_into().unwrap();
+        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .expect("Failed to create surface");
+
+        log::info!("Requesting WebGPU adapter (compatible with surface)...");
         let adapter = match instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::HighPerformance,
-                compatible_surface: None,
+                compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
@@ -35,7 +48,7 @@ impl GpuContext {
                 instance
                     .request_adapter(&RequestAdapterOptions {
                         power_preference: PowerPreference::LowPower,
-                        compatible_surface: None,
+                        compatible_surface: Some(&surface),
                         force_fallback_adapter: false,
                     })
                     .await
@@ -67,19 +80,15 @@ impl GpuContext {
             source: ShaderSource::Wgsl(include_str!("shaders/chw_to_rgba.wgsl").into()),
         });
 
-        // Create surface on the output canvas (must happen once, before any configure)
-        let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
-            .document().unwrap()
-            .get_element_by_id("output").unwrap()
-            .dyn_into().unwrap();
-        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-            .expect("Failed to create surface");
-
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.first().copied().unwrap_or(TextureFormat::Bgra8Unorm);
-        log::info!("Surface format: {:?}, available: {:?}", surface_format, caps.formats);
+        log::info!("Surface caps: formats={:?}, alpha_modes={:?}, present_modes={:?}",
+            caps.formats, caps.alpha_modes, caps.present_modes);
 
-        Self { instance, device, queue, surface, surface_format, rgba_to_chw_module, chw_to_rgba_module }
+        let surface_format = caps.formats.first().copied()
+            .expect("Surface has no supported formats — adapter/surface are incompatible");
+        log::info!("Using surface format: {:?}", surface_format);
+
+        Self { instance, adapter, device, queue, surface, surface_format, rgba_to_chw_module, chw_to_rgba_module }
     }
 
     pub fn create_buffer_init(&self, label: &str, data: &[f32], usage: BufferUsages) -> Buffer {

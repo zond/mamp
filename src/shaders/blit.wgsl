@@ -1,4 +1,4 @@
-// blit.wgsl — DEBUG: solid magenta output to test render pipeline
+// blit.wgsl — Fullscreen blit from u32-packed RGBA storage buffer to canvas
 
 struct Params {
     width: u32,
@@ -31,6 +31,12 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // HARDCODED MAGENTA — if you see this, the render pipeline works
-    return vec4(1.0, 0.0, 1.0, 1.0);
+    let x = u32(in.uv.x * f32(params.width));
+    let y = u32(in.uv.y * f32(params.height));
+    let idx = y * params.width + x;
+    let packed = pixels[idx];
+    let r = f32(packed & 0xFFu) / 255.0;
+    let g = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b = f32((packed >> 16u) & 0xFFu) / 255.0;
+    return vec4(r, g, b, 1.0);
 }

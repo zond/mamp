@@ -132,15 +132,25 @@ impl EvmPipeline {
                 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
 
-        // Configure the shared surface for this resolution
+        // Configure the shared surface for this resolution.
+        // Query capabilities to pick supported alpha_mode and present_mode
+        // rather than hardcoding values that may not exist on the device
+        // (e.g. Opaque is not always supported on Android/mobile Chrome).
+        let caps = ctx.surface.get_capabilities(&ctx.adapter);
+        let alpha_mode = caps.alpha_modes.first().copied()
+            .unwrap_or(CompositeAlphaMode::Auto);
+        let present_mode = caps.present_modes.first().copied()
+            .unwrap_or(PresentMode::Fifo);
+        log::info!("Surface configure: {}x{}, format={:?}, alpha={:?}, present={:?}",
+            w, h, ctx.surface_format, alpha_mode, present_mode);
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: ctx.surface_format,
             width: w,
             height: h,
-            present_mode: PresentMode::AutoVsync,
+            present_mode,
             desired_maximum_frame_latency: 1,
-            alpha_mode: CompositeAlphaMode::Opaque,
+            alpha_mode,
             view_formats: vec![],
         };
         ctx.surface.configure(&ctx.device, &surface_config);
@@ -364,7 +374,6 @@ impl EvmPipeline {
 
         // Get surface texture for this frame
         let tex_result = ctx.surface.get_current_texture();
-        log::info!("Surface texture: {:?}", std::mem::discriminant(&tex_result));
         let frame_tex = match tex_result {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
@@ -446,7 +455,6 @@ impl EvmPipeline {
 
         ctx.queue.submit(std::iter::once(encoder.finish()));
         frame_tex.present();
-        log::info!("Frame presented");
     }
 
     fn dispatch(

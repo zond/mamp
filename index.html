@@ -98,7 +98,7 @@
 
             try {
                 // Load WASM module (built by wasm-pack)
-                const wasm = await import('./pkg/motion_mag_webgpu.js');
+                const wasm = await import('./motion_mag_webgpu.js');
                 await wasm.default();
 
                 status.textContent = 'Running — motion magnification active';

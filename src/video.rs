@@ -29,7 +29,7 @@ impl VideoCapture {
         video.set_attribute("playsinline", "")?;
         video.set_width(width);
         video.set_height(height);
-        video.style().set_property("display", "none")?;
+        video.set_attribute("style", "display:none")?;
         document.body().unwrap().append_child(&video)?;
 
         // Offscreen canvas for pixel extraction
@@ -38,7 +38,7 @@ impl VideoCapture {
             .dyn_into::<HtmlCanvasElement>()?;
         canvas.set_width(width);
         canvas.set_height(height);
-        canvas.style().set_property("display", "none")?;
+        canvas.set_attribute("style", "display:none")?;
         document.body().unwrap().append_child(&canvas)?;
 
         let ctx2d = canvas

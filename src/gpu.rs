@@ -1,5 +1,6 @@
 // gpu.rs — WebGPU device init + compute pipeline helpers
 
+use wgpu::util::DeviceExt;
 use wgpu::*;
 
 /// Holds the WebGPU device, queue, and compiled shader modules.
@@ -9,7 +10,8 @@ pub struct GpuContext {
     pub conv2d_module: ShaderModule,
     pub manipulator_module: ShaderModule,
     pub upsample_module: ShaderModule,
-    pub frame_io_module: ShaderModule,
+    pub rgba_to_chw_module: ShaderModule,
+    pub chw_to_rgba_module: ShaderModule,
 }
 
 impl GpuContext {
@@ -56,9 +58,14 @@ impl GpuContext {
             source: ShaderSource::Wgsl(include_str!("shaders/upsample.wgsl").into()),
         });
 
-        let frame_io_module = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("frame_io"),
-            source: ShaderSource::Wgsl(include_str!("shaders/frame_io.wgsl").into()),
+        let rgba_to_chw_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("rgba_to_chw"),
+            source: ShaderSource::Wgsl(include_str!("shaders/rgba_to_chw.wgsl").into()),
+        });
+
+        let chw_to_rgba_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("chw_to_rgba"),
+            source: ShaderSource::Wgsl(include_str!("shaders/chw_to_rgba.wgsl").into()),
         });
 
         Self {
@@ -67,7 +74,8 @@ impl GpuContext {
             conv2d_module,
             manipulator_module,
             upsample_module,
-            frame_io_module,
+            rgba_to_chw_module,
+            chw_to_rgba_module,
         }
     }
 

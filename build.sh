@@ -12,8 +12,12 @@ fi
 # Build WASM with WebGPU target
 wasm-pack build --target web --release --out-dir pkg
 
-# Copy HTML to output
+# Copy HTML and weights to output
 cp index.html pkg/
+if [ -d weights ]; then
+    cp -r weights pkg/weights
+    echo "Copied trained weights to pkg/weights/"
+fi
 
 echo ""
 echo "=== Build complete ==="

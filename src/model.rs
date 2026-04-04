@@ -185,22 +185,52 @@ pub struct MotionMagModel {
     pub latent_height: u32,
 }
 
+/// Pre-loaded weight data for all layers.
+pub struct ModelWeights {
+    pub enc_conv1_w: Vec<f32>, pub enc_conv1_b: Vec<f32>,
+    pub enc_conv2_w: Vec<f32>, pub enc_conv2_b: Vec<f32>,
+    pub enc_conv3_w: Vec<f32>, pub enc_conv3_b: Vec<f32>,
+    pub enc_texture_w: Vec<f32>, pub enc_texture_b: Vec<f32>,
+    pub dec_conv1_w: Vec<f32>, pub dec_conv1_b: Vec<f32>,
+    pub dec_conv2_w: Vec<f32>, pub dec_conv2_b: Vec<f32>,
+    pub dec_conv3_w: Vec<f32>, pub dec_conv3_b: Vec<f32>,
+}
+
+impl ModelWeights {
+    /// Random Xavier-like initialization (for use when trained weights aren't available).
+    pub fn random() -> Self {
+        fn rand_w(n: usize) -> Vec<f32> {
+            let scale = (2.0 / n as f32).sqrt() * 0.1;
+            (0..n).map(|i| {
+                let x = (i as f32 * 0.618033988) % 1.0;
+                (x - 0.5) * scale
+            }).collect()
+        }
+        Self {
+            enc_conv1_w: rand_w(16 * 3 * 3 * 3), enc_conv1_b: vec![0.0; 16],
+            enc_conv2_w: rand_w(32 * 16 * 3 * 3), enc_conv2_b: vec![0.0; 32],
+            enc_conv3_w: rand_w(32 * 32 * 3 * 3), enc_conv3_b: vec![0.0; 32],
+            enc_texture_w: rand_w(32 * 32 * 1 * 1), enc_texture_b: vec![0.0; 32],
+            dec_conv1_w: rand_w(32 * 32 * 3 * 3), dec_conv1_b: vec![0.0; 32],
+            dec_conv2_w: rand_w(16 * 32 * 3 * 3), dec_conv2_b: vec![0.0; 16],
+            dec_conv3_w: rand_w(3 * 16 * 3 * 3), dec_conv3_b: vec![0.0; 3],
+        }
+    }
+}
+
 impl MotionMagModel {
-    /// Build the model with random weights (replace with loaded weights for real use).
-    /// `w` and `h` are input frame dimensions.
-    pub fn new(ctx: &GpuContext, w: u32, h: u32) -> Self {
-        let lw = w / 2;  // latent spatial dims after stride-2 conv
+    /// Build the model with the given weights.
+    pub fn new(ctx: &GpuContext, w: u32, h: u32, weights: &ModelWeights) -> Self {
+        let lw = w / 2;
         let lh = h / 2;
 
-        // ── Encoder ──
         let enc_conv1 = ConvLayer::new(
             ctx, "enc_conv1",
             ConvParams {
                 in_channels: 3, out_channels: 16, kernel_size: 3,
                 stride: 1, padding: 1, width: w, height: h, use_relu: 1,
             },
-            &random_weights(16 * 3 * 3 * 3),
-            &vec![0.0; 16],
+            &weights.enc_conv1_w, &weights.enc_conv1_b,
         );
 
         let enc_conv2 = ConvLayer::new(
@@ -209,8 +239,7 @@ impl MotionMagModel {
                 in_channels: 16, out_channels: 32, kernel_size: 3,
                 stride: 2, padding: 1, width: w, height: h, use_relu: 1,
             },
-            &random_weights(32 * 16 * 3 * 3),
-            &vec![0.0; 32],
+            &weights.enc_conv2_w, &weights.enc_conv2_b,
         );
 
         let enc_conv3 = ConvLayer::new(
@@ -219,60 +248,50 @@ impl MotionMagModel {
                 in_channels: 32, out_channels: 32, kernel_size: 3,
                 stride: 1, padding: 1, width: lw, height: lh, use_relu: 1,
             },
-            &random_weights(32 * 32 * 3 * 3),
-            &vec![0.0; 32],
+            &weights.enc_conv3_w, &weights.enc_conv3_b,
         );
 
-        // Texture branch: 1×1 conv (effectively a per-pixel linear layer)
         let enc_texture = ConvLayer::new(
             ctx, "enc_texture",
             ConvParams {
                 in_channels: 32, out_channels: 32, kernel_size: 1,
                 stride: 1, padding: 0, width: lw, height: lh, use_relu: 0,
             },
-            &random_weights(32 * 32 * 1 * 1),
-            &vec![0.0; 32],
+            &weights.enc_texture_w, &weights.enc_texture_b,
         );
 
-        // ── Manipulator pipeline ──
         let manip_pipeline = build_manipulator_pipeline(ctx);
 
-        // ── Decoder ──
         let dec_conv1 = ConvLayer::new(
             ctx, "dec_conv1",
             ConvParams {
                 in_channels: 32, out_channels: 32, kernel_size: 3,
                 stride: 1, padding: 1, width: lw, height: lh, use_relu: 1,
             },
-            &random_weights(32 * 32 * 3 * 3),
-            &vec![0.0; 32],
+            &weights.dec_conv1_w, &weights.dec_conv1_b,
         );
 
-        // After upsample: back to full resolution
         let dec_conv2 = ConvLayer::new(
             ctx, "dec_conv2",
             ConvParams {
                 in_channels: 32, out_channels: 16, kernel_size: 3,
                 stride: 1, padding: 1, width: w, height: h, use_relu: 1,
             },
-            &random_weights(16 * 32 * 3 * 3),
-            &vec![0.0; 16],
+            &weights.dec_conv2_w, &weights.dec_conv2_b,
         );
 
         let dec_conv3 = ConvLayer::new(
             ctx, "dec_conv3",
             ConvParams {
                 in_channels: 16, out_channels: 3, kernel_size: 3,
-                stride: 1, padding: 1, width: w, height: h, use_relu: 0,  // final: no relu
+                stride: 1, padding: 1, width: w, height: h, use_relu: 0,
             },
-            &random_weights(3 * 16 * 3 * 3),
-            &vec![0.0; 3],
+            &weights.dec_conv3_w, &weights.dec_conv3_b,
         );
 
         let upsample_pipeline = build_upsample_pipeline(ctx);
-
-        let rgba_to_chw_pipeline = build_frame_pipeline(ctx, "rgba_to_chw");
-        let chw_to_rgba_pipeline = build_frame_pipeline(ctx, "chw_to_rgba");
+        let rgba_to_chw_pipeline = build_frame_pipeline(ctx, &ctx.rgba_to_chw_module);
+        let chw_to_rgba_pipeline = build_frame_pipeline(ctx, &ctx.chw_to_rgba_module);
 
         Self {
             enc_conv1, enc_conv2, enc_conv3, enc_texture,
@@ -455,12 +474,12 @@ fn build_upsample_pipeline(ctx: &GpuContext) -> ComputePipeline {
     })
 }
 
-fn build_frame_pipeline(ctx: &GpuContext, entry: &str) -> ComputePipeline {
+fn build_frame_pipeline(ctx: &GpuContext, module: &ShaderModule) -> ComputePipeline {
     ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some(entry),
+        label: Some("frame_io"),
         layout: None,
-        module: &ctx.frame_io_module,
-        entry_point: entry,
+        module,
+        entry_point: "main",
     })
 }
 
@@ -497,12 +516,3 @@ fn bgl_entry(
     }
 }
 
-/// Placeholder: generate random weights for demo. Replace with weight loading.
-fn random_weights(n: usize) -> Vec<f32> {
-    // Xavier-ish init: small random values
-    let scale = (2.0 / n as f32).sqrt() * 0.1;
-    (0..n).map(|i| {
-        let x = (i as f32 * 0.618033988) % 1.0;
-        (x - 0.5) * scale
-    }).collect()
-}

@@ -36,14 +36,11 @@ features = [
     "Navigator",
     "Window",
     "CanvasRenderingContext2d",
-    "VideoTrack",
-    "GpuDevice",
-    "GpuAdapter",
-    "GpuQueue",
-    "OffscreenCanvas",
-    "ImageBitmap",
-    "HtmlImageElement",
     "Performance",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Headers",
 ]
 
 [profile.release]

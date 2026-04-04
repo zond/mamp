@@ -12,7 +12,7 @@ use wasm_bindgen::JsCast;
 use wgpu::BufferUsages;
 
 use gpu::GpuContext;
-use model::MotionMagModel;
+use model::{ModelWeights, MotionMagModel};
 use video::{OutputRenderer, VideoCapture};
 
 const WIDTH: u32 = 480;
@@ -29,7 +29,73 @@ struct AppState {
     running: bool,
 }
 
-/// Main WASM entry point. Call from JS: `wasm_bindgen.start()`
+/// Load trained weights from server, or fall back to random initialization.
+async fn load_weights() -> ModelWeights {
+    let layer_specs: &[(&str, usize)] = &[
+        ("enc_conv1.weight", 16 * 3 * 3 * 3),
+        ("enc_conv1.bias", 16),
+        ("enc_conv2.weight", 32 * 16 * 3 * 3),
+        ("enc_conv2.bias", 32),
+        ("enc_conv3.weight", 32 * 32 * 3 * 3),
+        ("enc_conv3.bias", 32),
+        ("enc_texture.weight", 32 * 32 * 1 * 1),
+        ("enc_texture.bias", 32),
+        ("dec_conv1.weight", 32 * 32 * 3 * 3),
+        ("dec_conv1.bias", 32),
+        ("dec_conv2.weight", 16 * 32 * 3 * 3),
+        ("dec_conv2.bias", 16),
+        ("dec_conv3.weight", 3 * 16 * 3 * 3),
+        ("dec_conv3.bias", 3),
+    ];
+
+    let mut loaded: Vec<Vec<f32>> = Vec::new();
+    let mut all_ok = true;
+
+    for (name, expected_len) in layer_specs {
+        let url = format!("weights/{}.bin", name);
+        match weights::load_weight_file(&url).await {
+            Ok(data) if data.len() == *expected_len => {
+                log::info!("Loaded {}: {} floats", name, data.len());
+                loaded.push(data);
+            }
+            Ok(data) => {
+                log::warn!("{}: expected {} floats, got {} — using random", name, expected_len, data.len());
+                all_ok = false;
+                break;
+            }
+            Err(e) => {
+                log::warn!("Failed to load {}: {:?} — using random weights", name, e);
+                all_ok = false;
+                break;
+            }
+        }
+    }
+
+    if !all_ok || loaded.len() != layer_specs.len() {
+        log::info!("Using random placeholder weights (train model with train.py)");
+        return ModelWeights::random();
+    }
+
+    let mut it = loaded.into_iter();
+    ModelWeights {
+        enc_conv1_w: it.next().unwrap(),
+        enc_conv1_b: it.next().unwrap(),
+        enc_conv2_w: it.next().unwrap(),
+        enc_conv2_b: it.next().unwrap(),
+        enc_conv3_w: it.next().unwrap(),
+        enc_conv3_b: it.next().unwrap(),
+        enc_texture_w: it.next().unwrap(),
+        enc_texture_b: it.next().unwrap(),
+        dec_conv1_w: it.next().unwrap(),
+        dec_conv1_b: it.next().unwrap(),
+        dec_conv2_w: it.next().unwrap(),
+        dec_conv2_b: it.next().unwrap(),
+        dec_conv3_w: it.next().unwrap(),
+        dec_conv3_b: it.next().unwrap(),
+    }
+}
+
+/// Main WASM entry point.
 #[wasm_bindgen(start)]
 pub async fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -37,20 +103,17 @@ pub async fn start() -> Result<(), JsValue> {
 
     log::info!("Initializing WebGPU motion magnification...");
 
-    // Init GPU
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
 
-    // Build model (with placeholder weights — swap in real ones)
-    let model = MotionMagModel::new(&ctx, WIDTH, HEIGHT);
+    let weights = load_weights().await;
+    let model = MotionMagModel::new(&ctx, WIDTH, HEIGHT, &weights);
     log::info!("Model built: {}x{}, latent {}x{}", WIDTH, HEIGHT, model.latent_width, model.latent_height);
 
-    // Init camera capture
     let capture = VideoCapture::new(WIDTH, HEIGHT)?;
     capture.start().await?;
     log::info!("Camera stream active");
 
-    // Output canvas (must exist in HTML as <canvas id="output">)
     let renderer = OutputRenderer::new("output", WIDTH, HEIGHT)?;
 
     let state = Rc::new(RefCell::new(AppState {
@@ -63,7 +126,6 @@ pub async fn start() -> Result<(), JsValue> {
         running: true,
     }));
 
-    // Start animation loop
     request_animation_frame(state.clone());
 
     // Expose alpha control to JS
@@ -73,11 +135,7 @@ pub async fn start() -> Result<(), JsValue> {
     }) as Box<dyn FnMut(f32)>);
 
     let window = web_sys::window().unwrap();
-    js_sys::Reflect::set(
-        &window,
-        &"setMagnification".into(),
-        set_alpha.as_ref(),
-    )?;
+    js_sys::Reflect::set(&window, &"setMagnification".into(), set_alpha.as_ref())?;
     set_alpha.forget();
 
     let state_for_toggle = state.clone();
@@ -90,11 +148,7 @@ pub async fn start() -> Result<(), JsValue> {
         }
     }) as Box<dyn FnMut()>);
 
-    js_sys::Reflect::set(
-        &window,
-        &"toggleMagnification".into(),
-        toggle.as_ref(),
-    )?;
+    js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
     Ok(())
@@ -135,36 +189,27 @@ fn request_animation_frame(state: Rc<RefCell<AppState>>) {
         .unwrap();
 }
 
-/// Process one frame: grab camera, run model, render output. Returns true to continue.
+/// Process one frame: grab camera, run model, render output.
 fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     let mut s = state.borrow_mut();
     if !s.running {
         return false;
     }
 
-    // Grab current camera frame
     let current_frame = match s.capture.grab_frame() {
         Ok(f) => f,
         Err(e) => {
             log::error!("Frame grab failed: {:?}", e);
-            return true; // keep trying
+            return true;
         }
     };
 
-    // Need two frames for magnification
     if let Some(ref prev) = s.prev_frame {
-        let t0 = web_sys::window()
-            .unwrap()
-            .performance()
-            .unwrap()
-            .now();
+        let t0 = web_sys::window().unwrap().performance().unwrap().now();
 
-        // Run the model on GPU
         let output_buf = s.model.magnify(&s.ctx, prev, &current_frame, s.alpha);
 
-        // Read back output pixels
-        // NOTE: In production, use GPU→texture→canvas path to avoid readback.
-        // This staging buffer approach is simpler for the skeleton.
+        // Read back output pixels via staging buffer
         let staging = s.ctx.create_buffer(
             "staging",
             (WIDTH * HEIGHT * 4) as u64,
@@ -174,24 +219,13 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
         let mut encoder = s.ctx.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("readback") },
         );
-        encoder.copy_buffer_to_buffer(
-            &output_buf, 0,
-            &staging, 0,
-            (WIDTH * HEIGHT * 4) as u64,
-        );
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging, 0, (WIDTH * HEIGHT * 4) as u64);
         s.ctx.queue.submit(std::iter::once(encoder.finish()));
 
-        // For now, render the input frame while GPU processes.
-        // Full async readback with wgpu's map_async would be the production path.
-        // This is a structural placeholder showing the pipeline flow.
+        // Render input frame while GPU processes (async readback would be production path)
         let _ = s.renderer.draw(&current_frame);
 
-        let t1 = web_sys::window()
-            .unwrap()
-            .performance()
-            .unwrap()
-            .now();
-
+        let t1 = web_sys::window().unwrap().performance().unwrap().now();
         log::info!("Frame time: {:.1}ms", t1 - t0);
     }
 

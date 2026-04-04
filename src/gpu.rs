@@ -21,6 +21,7 @@ impl GpuContext {
             ..Default::default()
         });
 
+        log::info!("Requesting WebGPU adapter...");
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::HighPerformance,
@@ -28,20 +29,21 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("No WebGPU adapter found");
+            .expect("No WebGPU adapter found — is WebGPU enabled in your browser?");
+
+        log::info!("Adapter: {:?}", adapter.get_info());
 
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
                     label: Some("motion-mag-device"),
                     required_features: Features::empty(),
-                    required_limits: Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
+                    required_limits: Limits::default(),
                 },
                 None,
             )
             .await
-            .expect("Failed to create device");
+            .expect("Failed to create WebGPU device");
 
         let conv2d_module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("conv2d"),

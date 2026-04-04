@@ -204,8 +204,8 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut avg_frame_time: f64 = 0.0;
     let mut estimated_fps: f32 = 30.0;
 
-    // Each map_async gets its own flag. Old callbacks write to dead Rc instances.
-    let mut map_ready: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // Shared readback flag — reused across frames, reset before each map_async.
+    let map_ready = Rc::new(Cell::new(false));
     let mut map_pending = false;
 
     loop {
@@ -260,7 +260,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
             }
 
-            map_ready = Rc::new(Cell::new(false));
+            map_ready.set(false);
             {
                 let s = state.borrow();
                 let flag = map_ready.clone();

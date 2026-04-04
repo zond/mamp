@@ -26,6 +26,7 @@
             background: #111;
             width: 100%;
             max-width: 100%;
+            cursor: pointer;
         }
         .controls {
             margin-top: 0.75rem;
@@ -198,6 +199,16 @@
                 }
 
                 status.textContent = 'Running';
+
+                // Toggle fullscreen on canvas click
+                document.getElementById('output').addEventListener('click', () => {
+                    const el = document.getElementById('output');
+                    if (document.fullscreenElement) {
+                        document.exitFullscreen();
+                    } else {
+                        el.requestFullscreen().catch(() => {});
+                    }
+                });
 
                 // Enumerate cameras now that permission is granted
                 await populateCameras();

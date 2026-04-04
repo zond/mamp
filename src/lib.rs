@@ -118,6 +118,8 @@ struct AppState {
     mapping_pending: Rc<Cell<bool>>,
     /// True once we have at least one magnified frame to display.
     has_magnified: bool,
+    /// Which staging buffer to write to next (alternates 0/1).
+    staging_idx: usize,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -327,6 +329,7 @@ pub async fn start() -> Result<(), JsValue> {
         magnified_pixels: vec![0u32; (w * h) as usize],
         mapping_pending: Rc::new(Cell::new(false)),
         has_magnified: false,
+        staging_idx: 0,
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -453,36 +456,43 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     dest.clear();
     dest.extend_from_slice(&frame);
 
-    // Read back magnified pixels if the previous map_async completed.
-    // Must unmap BEFORE calling magnify() which writes to the staging buffer.
+    // Double-buffered readback: read from the PREVIOUS staging buffer
+    // (the one that was written last frame) while writing to the OTHER one.
+    let read_idx = s.staging_idx ^ 1; // opposite of current write target
+
+    // If a map_async completed on the read buffer, grab the pixels
     if s.mapping_pending.get() {
         {
-            let view = s.model.buf_staging.slice(..).get_mapped_range();
+            let view = s.model.buf_staging[read_idx].slice(..).get_mapped_range();
             let pixels: &[u32] = bytemuck::cast_slice(&view);
             s.magnified_pixels.clear();
             s.magnified_pixels.extend_from_slice(pixels);
             s.has_magnified = true;
-        } // view dropped here, releasing the borrow on buf_staging
-        s.model.buf_staging.unmap();
+        }
+        s.model.buf_staging[read_idx].unmap();
         s.mapping_pending.set(false);
     }
 
-    // Run magnification if we have two frames and staging is free
+    // Run magnification writing to the CURRENT staging buffer (never mapped)
     if let Some(prev) = s.frames.prev_frame() {
         let (run_count, period) = skip_policy(s.avg_frame_time_ms);
         let should_magnify = (s.frame_index % period) < run_count;
 
-        if should_magnify && !s.mapping_pending.get() {
+        if should_magnify {
+            let write_idx = s.staging_idx;
             let current = s.frames.current_frame();
-            s.model.magnify(&s.ctx, prev, current, s.alpha);
+            s.model.magnify(&s.ctx, prev, current, s.alpha, write_idx);
 
-            // Request async mapping of the staging buffer
+            // Request async map on the buffer we just wrote to
             let pending = s.mapping_pending.clone();
-            s.model.buf_staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            s.model.buf_staging[write_idx].slice(..).map_async(wgpu::MapMode::Read, move |result| {
                 if result.is_ok() {
                     pending.set(true);
                 }
             });
+
+            // Swap: next frame writes to the other buffer
+            s.staging_idx ^= 1;
         }
     }
 

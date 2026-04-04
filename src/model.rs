@@ -210,7 +210,7 @@ pub struct MotionMagModel {
     buf_dec2: Buffer,
     buf_chw_out: Buffer,
     buf_rgba_out: Buffer,
-    pub buf_staging: Buffer,
+    pub buf_staging: [Buffer; 2],
 
     // Pre-allocated uniform buffers (avoid per-frame GPU allocation)
     frame_param_buf: Buffer,       // shared FrameParams uniform (width/height are fixed)
@@ -369,8 +369,10 @@ impl MotionMagModel {
         let buf_dec2 = ctx.create_buffer("dec2", 16 * pixels * 4, s);
         let buf_chw_out = ctx.create_buffer("chw_out", 3 * pixels * 4, s);
         let buf_rgba_out = ctx.create_buffer("rgba_out", pixels * 4, sc);
-        let buf_staging = ctx.create_buffer("staging", pixels * 4,
-            BufferUsages::MAP_READ | BufferUsages::COPY_DST);
+        let buf_staging = [
+            ctx.create_buffer("staging_0", pixels * 4, BufferUsages::MAP_READ | BufferUsages::COPY_DST),
+            ctx.create_buffer("staging_1", pixels * 4, BufferUsages::MAP_READ | BufferUsages::COPY_DST),
+        ];
 
         // Pre-allocate uniform buffers
         let frame_params = FrameParams { width: w, height: h, _pad0: 0, _pad1: 0 };
@@ -495,6 +497,7 @@ impl MotionMagModel {
         frame_a_rgba: &[u32],
         frame_b_rgba: &[u32],
         alpha: f32,
+        staging_idx: usize,
     ) {
         let w = self.width;
         let h = self.height;
@@ -547,7 +550,7 @@ impl MotionMagModel {
         // Copy result to staging buffer for CPU readback
         encoder.copy_buffer_to_buffer(
             &self.buf_rgba_out, 0,
-            &self.buf_staging, 0,
+            &self.buf_staging[staging_idx], 0,
             (w * h * 4) as u64,
         );
 

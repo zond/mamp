@@ -112,12 +112,6 @@ struct AppState {
     frame_index: u64,
     fps_frame_count: u32,
     fps_last_update: f64,
-    /// Last successfully read-back magnified frame.
-    magnified_pixels: Rc<RefCell<Vec<u32>>>,
-    /// True once at least one readback completed.
-    has_magnified: Rc<Cell<bool>>,
-    /// Tracks whether a readback is currently in-flight.
-    readback_in_flight: Rc<Cell<bool>>,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -274,7 +268,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
         s.running = true;
     }
 
-    request_animation_frame(state.clone());
+    wasm_bindgen_futures::spawn_local(run_loop(state.clone()));
     Ok(())
 }
 
@@ -324,15 +318,12 @@ pub async fn start() -> Result<(), JsValue> {
         frame_index: 0,
         fps_frame_count: 0,
         fps_last_update: now,
-        magnified_pixels: Rc::new(RefCell::new(vec![0u32; (w * h) as usize])),
-        has_magnified: Rc::new(Cell::new(false)),
-        readback_in_flight: Rc::new(Cell::new(false)),
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
     js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(state_ptr as f64))?;
 
-    request_animation_frame(state.clone());
+    wasm_bindgen_futures::spawn_local(run_loop(state.clone()));
 
     let state_for_js = state.clone();
     let set_alpha = Closure::wrap(Box::new(move |alpha: f32| {
@@ -345,10 +336,7 @@ pub async fn start() -> Result<(), JsValue> {
     let toggle = Closure::wrap(Box::new(move || {
         let mut s = state_for_toggle.borrow_mut();
         s.running = !s.running;
-        if s.running {
-            drop(s);
-            request_animation_frame(state_for_toggle.clone());
-        }
+        // run_loop polls s.running each frame, no restart needed
     }) as Box<dyn FnMut()>);
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
@@ -396,158 +384,133 @@ pub async fn start() -> Result<(), JsValue> {
     Ok(())
 }
 
-fn request_animation_frame(state: Rc<RefCell<AppState>>) {
-    let closure = Rc::new(RefCell::new(None::<Closure<dyn FnMut()>>));
-    let closure_clone = closure.clone();
-
-    *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-        let should_continue = process_frame(&state);
-
-        if should_continue {
-            let window = web_sys::window().unwrap();
-            window
-                .request_animation_frame(
-                    closure_clone
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .unchecked_ref(),
-                )
-                .unwrap();
-        }
-    }) as Box<dyn FnMut()>));
-
-    let window = web_sys::window().unwrap();
-    window
-        .request_animation_frame(
-            closure
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        )
-        .unwrap();
+/// Wait for the next animation frame (async wrapper around requestAnimationFrame).
+async fn next_frame() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        web_sys::window()
+            .unwrap()
+            .request_animation_frame(&resolve)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
-fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
-    let t0 = perf_now();
+/// Main async animation loop. All GPU readback is properly awaited.
+/// Key rule: never hold a RefCell borrow across an await point.
+async fn run_loop(state: Rc<RefCell<AppState>>) {
+    let mut magnified_pixels: Vec<u32> = Vec::new();
+    let mut has_magnified = false;
+    let mut frame_count: u32 = 0;
+    let mut last_fps_time = perf_now();
+    let mut frame_index: u64 = 0;
+    let mut avg_frame_time: f64 = 0.0;
 
-    let mut s = state.borrow_mut();
-    if !s.running {
-        return false;
-    }
+    loop {
+        next_frame().await;
 
-    // Grab frame - clone to release the Ref borrow on s.capture
-    let frame: Vec<u32> = match s.capture.grab_frame() {
-        Ok(f) => f.clone(),
-        Err(e) => {
-            log::error!("Frame grab failed: {:?}", e);
-            return true;
+        let t0 = perf_now();
+
+        // Check if still running
+        let running = state.borrow().running;
+        if !running {
+            // Yield and re-check
+            yield_once().await;
+            continue;
         }
-    };
-    s.frames.advance_index();
-    let idx = s.frames.current_idx();
-    let dest = &mut s.frames.bufs[idx];
-    dest.clear();
-    dest.extend_from_slice(&frame);
 
-    // Run magnification on the GPU
-    if let Some(prev) = s.frames.prev_frame() {
-        let (run_count, period) = skip_policy(s.avg_frame_time_ms);
-        let should_magnify = (s.frame_index % period) < run_count;
+        // Grab camera frame into a local buffer (brief borrow)
+        let mut frame: Vec<u32> = Vec::new();
+        {
+            let s = state.borrow();
+            if s.capture.grab_frame_into(&mut frame).is_err() {
+                continue;
+            }
+        }
 
-        if should_magnify && !s.readback_in_flight.get() {
-            let current = s.frames.current_frame();
-            // Run neural net, copy result to staging[0]
-            s.model.magnify(&s.ctx, prev, current, s.alpha, 0);
+        // Store in double buffer (brief mut borrow)
+        let (has_prev, prev_frame, current_frame, alpha) = {
+            let mut s = state.borrow_mut();
+            s.frames.advance_index();
+            let idx = s.frames.current_idx();
+            s.frames.bufs[idx].clear();
+            s.frames.bufs[idx].extend_from_slice(&frame);
 
-            // Kick off fully-async readback via spawn_local
-            let staging = &s.model.buf_staging[0];
-            let slice = staging.slice(..);
-            let mag_pixels = s.magnified_pixels.clone();
-            let has_mag = s.has_magnified.clone();
-            let in_flight = s.readback_in_flight.clone();
-            in_flight.set(true);
+            let prev = s.frames.prev_frame().map(|p| p.to_vec());
+            let current = s.frames.current_frame().to_vec();
+            let alpha = s.alpha;
+            (prev.is_some(), prev, current, alpha)
+        };
 
-            slice.map_async(wgpu::MapMode::Read, {
-                let mag_pixels = mag_pixels.clone();
-                let has_mag = has_mag.clone();
-                let in_flight = in_flight.clone();
-                move |result| {
-                    if result.is_ok() {
-                        // Callback fires when GPU work is done and buffer is mapped.
-                        // We CAN'T read here because we don't have a reference to the
-                        // buffer. We just signal that mapping is ready.
-                        // Reading happens in a spawn_local below.
-                    }
-                    let _ = (mag_pixels, has_mag, in_flight); // prevent drops
+        // Run magnification + async readback if we have two frames
+        if has_prev {
+            let prev = prev_frame.unwrap();
+            let (run_count, period) = skip_policy(avg_frame_time);
+            let should_magnify = (frame_index % period) < run_count;
+
+            if should_magnify {
+                // Run the neural net + copy to staging (brief borrow)
+                {
+                    let s = state.borrow();
+                    s.model.magnify(&s.ctx, &prev, &current_frame, alpha, 0);
                 }
-            });
+                // Borrow dropped — now do async readback safely
 
-            // spawn_local: wait for the buffer to be readable, then read + unmap
-            wasm_bindgen_futures::spawn_local({
-                let state_clone = state.clone();
-                async move {
-                    // Yield once to let the map_async callback fire
-                    yield_once().await;
-                    yield_once().await;
-
-                    if let Ok(s) = state_clone.try_borrow() {
-                        let staging = &s.model.buf_staging[0];
-                        {
-                            let view = staging.slice(..).get_mapped_range();
-                            let pixels: &[u32] = bytemuck::cast_slice(&view);
-                            let mut buf = s.magnified_pixels.borrow_mut();
-                            buf.clear();
-                            buf.extend_from_slice(pixels);
-                        }
-                        staging.unmap();
-                        s.has_magnified.set(true);
-                        s.readback_in_flight.set(false);
-                    }
+                // Signal map_async via Rc<Cell<bool>>
+                let map_ready = Rc::new(Cell::new(false));
+                {
+                    let s = state.borrow();
+                    let flag = map_ready.clone();
+                    s.model.buf_staging[0].slice(..).map_async(
+                        wgpu::MapMode::Read,
+                        move |r| { if r.is_ok() { flag.set(true); } },
+                    );
                 }
-            });
+                // Borrow dropped — poll until map completes
+                while !map_ready.get() {
+                    yield_once().await;
+                }
+
+                // Buffer is mapped — read pixels (brief borrow)
+                {
+                    let s = state.borrow();
+                    let view = s.model.buf_staging[0].slice(..).get_mapped_range();
+                    let pixels: &[u32] = bytemuck::cast_slice(&view);
+                    magnified_pixels.clear();
+                    magnified_pixels.extend_from_slice(pixels);
+                    has_magnified = true;
+                    drop(view);
+                    s.model.buf_staging[0].unmap();
+                }
+            }
+        }
+
+        // Display (brief borrow)
+        {
+            let s = state.borrow();
+            if has_magnified {
+                let _ = s.renderer.draw(&magnified_pixels);
+            } else {
+                let _ = s.renderer.draw(&current_frame);
+            }
+        }
+
+        // FPS tracking (no borrow needed)
+        frame_index += 1;
+        let elapsed = perf_now() - t0;
+        avg_frame_time = if avg_frame_time == 0.0 {
+            elapsed
+        } else {
+            FRAME_TIME_ALPHA * elapsed + (1.0 - FRAME_TIME_ALPHA) * avg_frame_time
+        };
+
+        frame_count += 1;
+        let now = perf_now();
+        if now - last_fps_time >= 1000.0 {
+            let fps = (frame_count as f64 / (now - last_fps_time)) * 1000.0;
+            frame_count = 0;
+            last_fps_time = now;
+            let window = web_sys::window().unwrap();
+            let _ = js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(fps));
         }
     }
-
-    // Display magnified frame if available, otherwise raw camera
-    if s.has_magnified.get() {
-        let mag = s.magnified_pixels.borrow();
-        let _ = s.renderer.draw(&mag);
-    } else {
-        let _ = s.renderer.draw(s.frames.current_frame());
-    }
-
-    s.frame_index += 1;
-
-    // Update EMA of frame time
-    let elapsed = perf_now() - t0;
-    if s.avg_frame_time_ms == 0.0 {
-        s.avg_frame_time_ms = elapsed;
-    } else {
-        s.avg_frame_time_ms =
-            FRAME_TIME_ALPHA * elapsed + (1.0 - FRAME_TIME_ALPHA) * s.avg_frame_time_ms;
-    }
-
-    // FPS counter: update once per second
-    s.fps_frame_count += 1;
-    let now = perf_now();
-    let dt = now - s.fps_last_update;
-    if dt >= 1000.0 {
-        let fps = (s.fps_frame_count as f64 / dt) * 1000.0;
-        s.fps_frame_count = 0;
-        s.fps_last_update = now;
-
-        // Expose to JS as window.__mamp_fps
-        let window = web_sys::window().unwrap();
-        let _ = js_sys::Reflect::set(
-            &window,
-            &"__mamp_fps".into(),
-            &JsValue::from_f64(fps),
-        );
-    }
-
-    true
 }

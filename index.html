@@ -236,10 +236,24 @@
                     this.textContent = this.textContent === 'Pause' ? 'Resume' : 'Pause';
                 });
 
-                // FPS display: poll window.__mamp_fps once per second
+                // FPS display + update Nyquist limit on freq sliders
                 const fpsEl = document.getElementById('fps-display');
                 setInterval(() => {
                     const fps = window.__mamp_fps;
+                    if (typeof fps === 'number' && fps > 0) {
+                        const nyquist = fps / 2;
+                        const nq = Math.round(nyquist * 10) / 10;
+                        freqCenter.max = nq;
+                        freqBw.max = nq * 2;
+                        // Clamp current values if they exceed new max
+                        if (parseFloat(freqCenter.value) > nq) {
+                            freqCenter.value = nq;
+                        }
+                        if (parseFloat(freqBw.value) > nq * 2) {
+                            freqBw.value = nq * 2;
+                        }
+                        updateFreqs();
+                    }
                     if (typeof fps === 'number' && fps > 0) {
                         fpsEl.textContent = Math.round(fps) + ' fps';
                     } else {

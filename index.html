@@ -89,24 +89,21 @@
 
     <canvas id="output" width="480" height="360"></canvas>
 
-    <div class="controls">
-        <span class="slider-group">
-            <label for="camera">Camera</label>
-            <select id="camera"><option value="">Loading...</option></select>
-        </span>
-        <span class="slider-group">
-            <label for="resolution">Res</label>
-            <select id="resolution">
-                <option value="160">160</option>
-                <option value="240">240</option>
-                <option value="320">320</option>
-                <option value="480">480</option>
-                <option value="640" selected>640</option>
-                <option value="960">960</option>
-                <option value="1280">1280</option>
-            </select>
-        </span>
+    <div class="controls" style="flex-wrap:nowrap;">
+        <label for="camera">Camera</label>
+        <select id="camera" style="flex:1;min-width:0;"><option value="">Loading...</option></select>
+        <label for="resolution">Res</label>
+        <select id="resolution">
+            <option value="160">160</option>
+            <option value="240">240</option>
+            <option value="320">320</option>
+            <option value="480">480</option>
+            <option value="640" selected>640</option>
+            <option value="960">960</option>
+            <option value="1280">1280</option>
+        </select>
     </div>
+    <p id="status" style="margin:0.3rem 0;font-size:0.85rem;color:#888;">Initializing WebGPU...</p>
     <div class="controls">
         <span class="slider-group">
             <label for="alpha">Amplify</label>
@@ -123,14 +120,11 @@
             <input type="range" id="freq-bw" min="0.2" max="15" value="2.5" step="0.1">
             <span id="freq-bw-val">2.5</span>
         </span>
-
     </div>
     <div class="controls">
-        <span id="fps-display" style="font-size:0.85rem;color:#6c5ce7;font-weight:700;min-width:6ch;">-- fps</span>
         <button id="toggle">Pause</button>
         <button id="copy-log">Copy Log</button>
     </div>
-    <p id="status">Initializing WebGPU...</p>
     <div id="debug-log"></div>
 
     <script type="module">
@@ -266,7 +260,6 @@
                 });
 
                 // FPS display + update Nyquist limit on freq sliders
-                const fpsEl = document.getElementById('fps-display');
                 setInterval(() => {
                     const fps = window.__mamp_fps;
                     if (typeof fps === 'number' && fps > 0) {
@@ -283,11 +276,13 @@
                         }
                         updateFreqs();
                     }
+                    const res = window.__mamp_res || '';
+                    const paused = document.getElementById('toggle').textContent === 'Resume';
+                    const state = paused ? 'Paused' : 'Running';
                     if (typeof fps === 'number' && fps > 0) {
-                        const res = window.__mamp_res || '';
-                        fpsEl.textContent = Math.round(fps) + ' fps ' + res;
+                        status.textContent = `${state} — ${Math.round(fps)} fps ${res}`;
                     } else {
-                        fpsEl.textContent = '-- fps';
+                        status.textContent = state;
                     }
                 }, 1000);
 

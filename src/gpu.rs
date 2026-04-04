@@ -109,28 +109,18 @@ impl GpuContext {
         })
     }
 
-    /// Dispatch a compute pipeline with given bind group.
-    pub fn dispatch(
-        &self,
-        pipeline: &ComputePipeline,
-        bind_group: &BindGroup,
+    /// Record a compute dispatch into an existing compute pass.
+    /// This avoids per-dispatch encoder/submit overhead by letting the caller
+    /// batch many dispatches into a single command encoder submission.
+    pub fn record_dispatch<'a>(
+        pass: &mut ComputePass<'a>,
+        pipeline: &'a ComputePipeline,
+        bind_group: &'a BindGroup,
         workgroups: (u32, u32, u32),
     ) {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("dispatch"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("compute"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, Some(bind_group), &[]);
-            pass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
-        }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, Some(bind_group), &[]);
+        pass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
     }
 
     /// Helper: ceil division for workgroup count.

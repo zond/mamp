@@ -86,8 +86,16 @@
         <label for="alpha">&alpha;</label>
         <input type="range" id="alpha" min="1" max="100" value="20" step="1">
         <span id="alpha-val">20&times;</span>
+        <label for="quality">Quality</label>
+        <select id="quality">
+            <option value="0">Full (480p)</option>
+            <option value="1">Medium (320p)</option>
+            <option value="2">Low (240p)</option>
+        </select>
+
         <button id="toggle">Pause</button>
         <button id="copy-log">Copy Log</button>
+        <span id="fps-display" style="font-size:0.85rem;color:#6c5ce7;font-weight:700;min-width:6ch;">-- fps</span>
     </div>
     <p id="status">Initializing WebGPU...</p>
     <div id="debug-log"></div>
@@ -189,11 +197,29 @@
                     if (window.setMagnification) window.setMagnification(v);
                 });
 
+                // Quality selector
+                document.getElementById('quality').addEventListener('change', (e) => {
+                    const level = parseInt(e.target.value, 10);
+                    dbg(`Setting quality level: ${level}`);
+                    if (window.setQuality) window.setQuality(level);
+                });
+
                 // Pause/resume
                 document.getElementById('toggle').addEventListener('click', function() {
                     if (window.toggleMagnification) window.toggleMagnification();
                     this.textContent = this.textContent === 'Pause' ? 'Resume' : 'Pause';
                 });
+
+                // FPS display: poll window.__mamp_fps once per second
+                const fpsEl = document.getElementById('fps-display');
+                setInterval(() => {
+                    const fps = window.__mamp_fps;
+                    if (typeof fps === 'number' && fps > 0) {
+                        fpsEl.textContent = Math.round(fps) + ' fps';
+                    } else {
+                        fpsEl.textContent = '-- fps';
+                    }
+                }, 1000);
 
             } catch (e) {
                 status.textContent = `Error: ${e.message || e}`;

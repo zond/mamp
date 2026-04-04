@@ -1,5 +1,4 @@
 // conv2d.wgsl — General-purpose Conv2D + ReLU compute shader
-// Dispatched per output pixel. Supports arbitrary kernel size, stride, padding.
 
 struct ConvParams {
     in_channels: u32,
@@ -9,7 +8,7 @@ struct ConvParams {
     padding: u32,
     width: u32,
     height: u32,
-    use_relu: u32,  // 0 = no activation, 1 = ReLU
+    use_relu: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: ConvParams;

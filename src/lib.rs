@@ -214,9 +214,17 @@ fn skip_policy(avg_ms: f64) -> (u64, u64) {
     }
 }
 
-/// Yield to the browser event loop so pending callbacks (like requestAnimationFrame) can run.
-async fn yield_once() {
-    let promise = js_sys::Promise::resolve(&JsValue::NULL);
+/// Yield to the browser event loop via setTimeout(0).
+/// Unlike Promise.resolve() which runs as a microtask (and never lets GPU
+/// callbacks fire), setTimeout(0) yields to the macrotask queue, giving the
+/// browser time to process GPU work and fire map_async callbacks.
+async fn yield_to_browser() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        web_sys::window()
+            .unwrap()
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
+            .unwrap();
+    });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
@@ -239,8 +247,8 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     }
 
     // Let the animation frame callback finish so it releases its borrow
-    yield_once().await;
-    yield_once().await;
+    yield_to_browser().await;
+    yield_to_browser().await;
 
     // Now safe: animation loop has stopped, no concurrent borrows
     state.borrow().capture.start_with_device(device_id).await?;
@@ -414,7 +422,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
         let running = state.borrow().running;
         if !running {
             // Yield and re-check
-            yield_once().await;
+            yield_to_browser().await;
             continue;
         }
 
@@ -465,9 +473,17 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                         move |r| { if r.is_ok() { flag.set(true); } },
                     );
                 }
-                // Borrow dropped — poll until map completes
-                while !map_ready.get() {
-                    yield_once().await;
+                // Borrow dropped — poll until map completes (with timeout)
+                let mut polls = 0;
+                while !map_ready.get() && polls < 60 {
+                    yield_to_browser().await;
+                    polls += 1;
+                }
+                if !map_ready.get() {
+                    // Timed out — skip readback this frame
+                    log::warn!("map_async timed out after {} polls", polls);
+                    frame_index += 1;
+                    continue;
                 }
 
                 // Buffer is mapped — read pixels (brief borrow)

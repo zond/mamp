@@ -110,7 +110,8 @@ impl EvmPipeline {
         let pixels = (w * h) as u64;
 
         let buf_frame_rgba = ctx.create_buffer("evm_frame", pixels * 4, scd);
-        let buf_output_rgba = ctx.create_buffer("evm_out", pixels * 4, s);
+        let buf_output_rgba = ctx.create_buffer("evm_out", pixels * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST);
 
         let gaussian: [Buffer; N_LEVELS] = std::array::from_fn(|i| {
             ctx.create_buffer(&format!("g{}", i),

@@ -85,16 +85,20 @@
     <canvas id="output" width="480" height="360"></canvas>
 
     <div class="controls">
-        <label for="camera">Camera</label>
-        <select id="camera"><option value="">Loading...</option></select>
-        <label for="resolution">Res</label>
-        <select id="resolution">
-            <option value="320">320p</option>
-            <option value="480">480p</option>
-            <option value="640" selected>640p</option>
-            <option value="960">960p</option>
-            <option value="1280">1280p</option>
-        </select>
+        <span class="slider-group">
+            <label for="camera">Camera</label>
+            <select id="camera"><option value="">Loading...</option></select>
+        </span>
+        <span class="slider-group">
+            <label for="resolution">Res</label>
+            <select id="resolution">
+                <option value="320">320p</option>
+                <option value="480">480p</option>
+                <option value="640" selected>640p</option>
+                <option value="960">960p</option>
+                <option value="1280">1280p</option>
+            </select>
+        </span>
     </div>
     <div class="controls">
         <span class="slider-group">

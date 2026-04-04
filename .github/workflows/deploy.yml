@@ -30,8 +30,16 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build
+      - name: Install binaryen (recent wasm-opt)
+        run: |
+          curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_121/bin" >> $GITHUB_PATH
+
+      - name: Build WASM (wasm-pack's wasm-opt disabled in Cargo.toml)
         run: wasm-pack build --target web --release --out-dir pkg
+
+      - name: Optimize WASM with recent wasm-opt
+        run: wasm-opt pkg/motion_mag_webgpu_bg.wasm -O -o pkg/motion_mag_webgpu_bg.wasm --enable-bulk-memory
 
       - name: Copy index.html to pkg
         run: cp index.html pkg/

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Real-time video motion magnification via WebGPU (Ha et al. 2024 architecture)"
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

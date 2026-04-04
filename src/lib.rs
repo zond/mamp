@@ -1,16 +1,13 @@
 // lib.rs — WASM entry point for real-time motion magnification
 
 mod gpu;
-#[allow(dead_code)]
 mod model;
-#[allow(dead_code)]
 mod video;
 mod weights;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 
 use gpu::GpuContext;
 use model::{ModelWeights, MotionMagModel};
@@ -52,17 +49,6 @@ impl FrameBuffers {
     }
 
     /// Advance to the next frame and return the buffer that should receive the
-    /// new capture data.  After this call the old "current" buffer becomes the
-    /// "previous" buffer.
-    fn _advance(&mut self) -> &mut Vec<u32> {
-        if !self.bufs[self.current].is_empty() {
-            // We already have at least one captured frame; after swapping, the
-            // old current is reachable as prev.
-            self.current ^= 1;
-            self.has_prev = true;
-        }
-        &mut self.bufs[self.current]
-    }
 
     /// Like advance() but only updates the index, doesn't return a reference.
     fn advance_index(&mut self) {
@@ -110,8 +96,6 @@ struct AppState {
     quality: u32,
     avg_frame_time_ms: f64,
     frame_index: u64,
-    fps_frame_count: u32,
-    fps_last_update: f64,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -310,7 +294,6 @@ pub async fn start() -> Result<(), JsValue> {
 
     let renderer = OutputRenderer::new("output", w, h)?;
 
-    let now = perf_now();
     let state = Rc::new(RefCell::new(AppState {
         ctx,
         model,
@@ -324,8 +307,6 @@ pub async fn start() -> Result<(), JsValue> {
         quality: 0,
         avg_frame_time_ms: 0.0,
         frame_index: 0,
-        fps_frame_count: 0,
-        fps_last_update: now,
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -463,7 +444,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 // Run the neural net + copy to staging (brief borrow)
                 {
                     let s = state.borrow();
-                    s.model.magnify(&s.ctx, &prev_buf, &current_buf, alpha, 0);
+                    s.model.magnify(&s.ctx, &prev_buf, &current_buf, alpha);
                 }
                 // Borrow dropped — now do async readback safely
 
@@ -472,7 +453,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 {
                     let s = state.borrow();
                     let flag = map_ready.clone();
-                    s.model.buf_staging[0].slice(..).map_async(
+                    s.model.buf_staging.slice(..).map_async(
                         wgpu::MapMode::Read,
                         move |r| { if r.is_ok() { flag.set(true); } },
                     );
@@ -487,7 +468,7 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                     // Timed out — must unmap to avoid corrupted buffer state
                     log::warn!("map_async timed out after {} polls", polls);
                     let s = state.borrow();
-                    s.model.buf_staging[0].unmap();
+                    s.model.buf_staging.unmap();
                     drop(s);
                     frame_index += 1;
                     continue;
@@ -496,13 +477,13 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
                 // Buffer is mapped — read pixels (brief borrow)
                 {
                     let s = state.borrow();
-                    let view = s.model.buf_staging[0].slice(..).get_mapped_range();
+                    let view = s.model.buf_staging.slice(..).get_mapped_range();
                     let pixels: &[u32] = bytemuck::cast_slice(&view);
                     magnified_pixels.clear();
                     magnified_pixels.extend_from_slice(pixels);
                     has_magnified = true;
                     drop(view);
-                    s.model.buf_staging[0].unmap();
+                    s.model.buf_staging.unmap();
                 }
             }
         }

@@ -210,7 +210,7 @@ pub struct MotionMagModel {
     buf_dec2: Buffer,
     buf_chw_out: Buffer,
     buf_rgba_out: Buffer,
-    pub buf_staging: [Buffer; 2],
+    pub buf_staging: Buffer,
 
     // Pre-allocated uniform buffers (avoid per-frame GPU allocation)
     frame_param_buf: Buffer,       // shared FrameParams uniform (width/height are fixed)
@@ -370,10 +370,8 @@ impl MotionMagModel {
         let buf_dec2 = ctx.create_buffer("dec2", 16 * pixels * 4, s);
         let buf_chw_out = ctx.create_buffer("chw_out", 3 * pixels * 4, s);
         let buf_rgba_out = ctx.create_buffer("rgba_out", pixels * 4, sc);
-        let buf_staging = [
-            ctx.create_buffer("staging_0", pixels * 4, BufferUsages::MAP_READ | BufferUsages::COPY_DST),
-            ctx.create_buffer("staging_1", pixels * 4, BufferUsages::MAP_READ | BufferUsages::COPY_DST),
-        ];
+        let buf_staging = ctx.create_buffer("staging", pixels * 4,
+            BufferUsages::MAP_READ | BufferUsages::COPY_DST);
 
         // Pre-allocate uniform buffers
         let frame_params = FrameParams { width: w, height: h, _pad0: 0, _pad1: 0 };
@@ -498,7 +496,6 @@ impl MotionMagModel {
         frame_a_rgba: &[u32],
         frame_b_rgba: &[u32],
         alpha: f32,
-        staging_idx: usize,
     ) {
         let w = self.width;
         let h = self.height;
@@ -551,62 +548,11 @@ impl MotionMagModel {
         // Copy result to staging buffer for CPU readback
         encoder.copy_buffer_to_buffer(
             &self.buf_rgba_out, 0,
-            &self.buf_staging[staging_idx], 0,
+            &self.buf_staging, 0,
             (w * h * 4) as u64,
         );
 
         // Single submit for the entire frame
-        ctx.queue.submit(std::iter::once(encoder.finish()));
-    }
-
-    /// Run magnification without staging copy (for when readback is handled separately).
-    pub fn magnify_no_staging(
-        &self,
-        ctx: &GpuContext,
-        frame_a_rgba: &[u32],
-        frame_b_rgba: &[u32],
-        alpha: f32,
-    ) {
-        let w = self.width;
-        let h = self.height;
-        let lw = self.latent_width;
-        let lh = self.latent_height;
-
-        ctx.queue.write_buffer(&self.buf_frame_a, 0, bytemuck::cast_slice(frame_a_rgba));
-        ctx.queue.write_buffer(&self.buf_frame_b, 0, bytemuck::cast_slice(frame_b_rgba));
-
-        let manip_params = ManipParams { channels: 32, height: lh, width: lw, alpha };
-        ctx.queue.write_buffer(&self.manip_param_buf, 0, bytemuck::bytes_of(&manip_params));
-
-        let mut encoder = ctx.device.create_command_encoder(
-            &CommandEncoderDescriptor { label: Some("magnify") },
-        );
-
-        self.record_frame_dispatch(&mut encoder, "rgba_to_chw_a",
-            &self.rgba_to_chw_pipeline, &self.rgba_to_chw_a_bg, w, h);
-        self.record_frame_dispatch(&mut encoder, "rgba_to_chw_b",
-            &self.rgba_to_chw_pipeline, &self.rgba_to_chw_b_bg, w, h);
-
-        self.enc_conv1.record(&mut encoder, &self.enc_conv1_a_bg);
-        self.enc_conv2.record(&mut encoder, &self.enc_conv2_a_bg);
-        self.enc_conv3.record(&mut encoder, &self.enc_conv3_a_bg);
-        self.enc_texture.record(&mut encoder, &self.enc_texture_a_bg);
-
-        self.enc_conv1.record(&mut encoder, &self.enc_conv1_b_bg);
-        self.enc_conv2.record(&mut encoder, &self.enc_conv2_b_bg);
-        self.enc_conv3.record(&mut encoder, &self.enc_conv3_b_bg);
-
-        self.record_manip_dispatch(&mut encoder, lw, lh);
-
-        self.dec_conv1.record(&mut encoder, &self.dec_conv1_bg);
-        self.record_upsample_dispatch(&mut encoder, w, h);
-        self.dec_conv2.record(&mut encoder, &self.dec_conv2_bg);
-        self.dec_conv3.record(&mut encoder, &self.dec_conv3_bg);
-
-        self.record_frame_dispatch(&mut encoder, "chw_to_rgba",
-            &self.chw_to_rgba_pipeline, &self.chw_to_rgba_bg, w, h);
-
-        // No staging copy — result stays in buf_rgba_out on GPU
         ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 

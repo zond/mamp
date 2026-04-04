@@ -1,6 +1,5 @@
 // video.rs — Browser camera capture and canvas rendering via web-sys
 
-use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -15,8 +14,6 @@ pub struct VideoCapture {
     ctx2d: CanvasRenderingContext2d,
     pub width: u32,
     pub height: u32,
-    /// Reusable pixel buffer to avoid allocating every frame.
-    pixel_buf: RefCell<Vec<u32>>,
 }
 
 impl VideoCapture {
@@ -48,9 +45,7 @@ impl VideoCapture {
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 
-        let pixel_buf = RefCell::new(Vec::with_capacity((width * height) as usize));
-
-        Ok(Self { video, _canvas: canvas, ctx2d, width, height, pixel_buf })
+        Ok(Self { video, _canvas: canvas, ctx2d, width, height })
     }
 
     /// Start camera with optional device ID (empty string = default camera).
@@ -153,37 +148,6 @@ impl VideoCapture {
         Ok(())
     }
 
-    /// Convenience wrapper that uses the internal reusable buffer and returns
-    /// a reference via `std::cell::Ref`.  Useful when the caller does not
-    /// manage its own buffer.
-    pub fn grab_frame(&self) -> Result<std::cell::Ref<'_, Vec<u32>>, JsValue> {
-        let mut buf = self.pixel_buf.borrow_mut();
-        self.ctx2d.draw_image_with_html_video_element_and_dw_and_dh(
-            &self.video,
-            0.0, 0.0,
-            self.width as f64,
-            self.height as f64,
-        )?;
-
-        let image_data = self.ctx2d.get_image_data(
-            0.0, 0.0,
-            self.width as f64,
-            self.height as f64,
-        )?;
-
-        let raw: Vec<u8> = image_data.data().0;
-
-        buf.clear();
-        buf.extend(raw.chunks_exact(4).map(|c| {
-            (c[0] as u32)
-                | ((c[1] as u32) << 8)
-                | ((c[2] as u32) << 16)
-                | ((c[3] as u32) << 24)
-        }));
-
-        drop(buf);
-        Ok(self.pixel_buf.borrow())
-    }
 }
 
 /// Render output: write RGBA u32 data to a visible canvas.
@@ -192,8 +156,6 @@ pub struct OutputRenderer {
     ctx2d: CanvasRenderingContext2d,
     width: u32,
     height: u32,
-    /// Reusable byte buffer to avoid allocating every frame during draw.
-    byte_buf: RefCell<Vec<u8>>,
 }
 
 impl OutputRenderer {
@@ -211,30 +173,17 @@ impl OutputRenderer {
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 
-        let byte_buf = RefCell::new(Vec::with_capacity((width * height * 4) as usize));
-
-        Ok(Self { _canvas: canvas, ctx2d, width, height, byte_buf })
+        Ok(Self { _canvas: canvas, ctx2d, width, height })
     }
 
     pub fn draw(&self, pixels: &[u32]) -> Result<(), JsValue> {
-        let mut bytes = self.byte_buf.borrow_mut();
-        bytes.clear();
-        bytes.reserve(pixels.len() * 4);
-
-        for &p in pixels {
-            bytes.push((p & 0xFF) as u8);
-            bytes.push(((p >> 8) & 0xFF) as u8);
-            bytes.push(((p >> 16) & 0xFF) as u8);
-            bytes.push(((p >> 24) & 0xFF) as u8);
-        }
-
-        let clamped = wasm_bindgen::Clamped(&bytes[..]);
+        let bytes: &[u8] = bytemuck::cast_slice(pixels);
+        let clamped = wasm_bindgen::Clamped(bytes);
         let image_data = ImageData::new_with_u8_clamped_array_and_sh(
             clamped,
             self.width,
             self.height,
         )?;
-        drop(bytes);
         self.ctx2d.put_image_data(&image_data, 0.0, 0.0)?;
 
         Ok(())

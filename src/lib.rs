@@ -225,23 +225,20 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
 
         // If previous readback completed, grab the magnified pixels
         if map_pending && map_ready.get() {
-            let s = state.borrow();
-            let view = s.evm.buf_staging.slice(..).get_mapped_range();
-            let pixels: &[u32] = bytemuck::cast_slice(&view);
-            magnified_pixels.clear();
-            magnified_pixels.extend_from_slice(pixels);
-            has_magnified = true;
-            drop(view);
-            // unmap happens below unconditionally
+            if let Ok(s) = state.try_borrow() {
+                let view = s.evm.buf_staging.slice(..).get_mapped_range();
+                let pixels: &[u32] = bytemuck::cast_slice(&view);
+                magnified_pixels.clear();
+                magnified_pixels.extend_from_slice(pixels);
+                has_magnified = true;
+                drop(view);
+                s.evm.buf_staging.unmap();
+            }
+            map_pending = false;
+            map_ready.set(false);
+        } else if map_pending {
+            // Still waiting for readback — skip EVM this frame, just show camera
         }
-
-        // ALWAYS unmap staging before process_frame writes to it.
-        // unmap() is safe on unmapped/pending buffers — it's a no-op or cancels the request.
-        {
-            let s = state.borrow();
-            s.evm.buf_staging.unmap();
-        }
-        map_pending = false;
 
         // Grab camera frame
         frame.clear();
@@ -252,36 +249,43 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Run EVM every frame (3 dispatches, very fast)
-        let (amp, fl, fh) = {
-            let s = state.borrow();
-            (s.amplification, s.freq_low, s.freq_high)
-        };
-        {
-            let s = state.borrow();
-            s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
+        // Run EVM + request readback (only if no pending readback)
+        if !map_pending {
+            let (amp, fl, fh) = {
+                let s = state.borrow();
+                (s.amplification, s.freq_low, s.freq_high)
+            };
+            {
+                let s = state.borrow();
+                s.evm.process_frame(&s.ctx, &frame, amp, fl, fh, estimated_fps);
+            }
+
+            map_ready = Rc::new(Cell::new(false));
+            {
+                let s = state.borrow();
+                let flag = map_ready.clone();
+                s.evm.buf_staging.slice(..).map_async(
+                    wgpu::MapMode::Read,
+                    move |r| { if r.is_ok() { flag.set(true); } },
+                );
+            }
+            map_pending = true;
         }
 
-        // Request readback with a FRESH flag
-        map_ready = Rc::new(Cell::new(false));
+        // Always show the latest camera frame, overlay magnified when available
         {
             let s = state.borrow();
-            let flag = map_ready.clone();
-            s.evm.buf_staging.slice(..).map_async(
-                wgpu::MapMode::Read,
-                move |r| { if r.is_ok() { flag.set(true); } },
-            );
-        }
-        map_pending = true;
-
-        // Display
-        {
-            let s = state.borrow();
-            if has_magnified {
+            if has_magnified && !magnified_pixels.is_empty() {
                 let _ = s.renderer.draw(&magnified_pixels);
             } else {
                 let _ = s.renderer.draw(&frame);
             }
+        }
+
+        // Periodic debug logging
+        if frame_count < 5 || frame_count % 60 == 0 {
+            log::info!("frame={} map_pending={} map_ready={} has_mag={} pixels={}",
+                frame_count, map_pending, map_ready.get(), has_magnified, frame.len());
         }
 
         // FPS tracking

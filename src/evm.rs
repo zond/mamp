@@ -5,6 +5,7 @@
 
 use crate::gpu::GpuContext;
 use bytemuck::{Pod, Zeroable};
+use wasm_bindgen::JsCast;
 use wgpu::*;
 
 const N_LEVELS: usize = 4;
@@ -132,24 +133,29 @@ impl EvmPipeline {
                 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
 
-        // Configure the shared surface for this resolution.
-        // Query capabilities to pick supported alpha_mode and present_mode
-        // rather than hardcoding values that may not exist on the device
-        // (e.g. Opaque is not always supported on Android/mobile Chrome).
+        // Configure surface at the canvas's HTML size (NOT the processing resolution).
+        // Setting canvas.width/height resets the WebGPU context, so we must use
+        // whatever size the canvas already has and scale in the blit shader.
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
+            .document().unwrap()
+            .get_element_by_id("output").unwrap()
+            .unchecked_into();
+        let surf_w = canvas.width();
+        let surf_h = canvas.height();
         let caps = ctx.surface.get_capabilities(&ctx.adapter);
         let alpha_mode = caps.alpha_modes.first().copied()
             .unwrap_or(CompositeAlphaMode::Auto);
         let present_mode = caps.present_modes.first().copied()
             .unwrap_or(PresentMode::Fifo);
-        log::info!("Surface configure: {}x{}, format={:?}, alpha={:?}, present={:?}",
-            w, h, ctx.surface_format, alpha_mode, present_mode);
+        log::info!("Surface configure: {}x{} (processing {}x{}), format={:?}, alpha={:?}, present={:?}",
+            surf_w, surf_h, w, h, ctx.surface_format, alpha_mode, present_mode);
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: ctx.surface_format,
-            width: w,
-            height: h,
+            width: surf_w,
+            height: surf_h,
             present_mode,
-            desired_maximum_frame_latency: 1,
+            desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
         };

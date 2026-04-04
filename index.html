@@ -257,7 +257,8 @@
                         updateFreqs();
                     }
                     if (typeof fps === 'number' && fps > 0) {
-                        fpsEl.textContent = Math.round(fps) + ' fps';
+                        const res = window.__mamp_res || '';
+                        fpsEl.textContent = Math.round(fps) + ' fps ' + res;
                     } else {
                         fpsEl.textContent = '-- fps';
                     }

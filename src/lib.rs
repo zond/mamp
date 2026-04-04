@@ -194,7 +194,6 @@ fn rebuild_evm(s: &mut AppState, max_w: u32) {
     if w == s.width && h == s.height { return; }
     log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
-    let canvas = get_canvas();
     s.evm = EvmPipeline::new(&s.ctx, w, h);
     s.width = w;
     s.height = h;

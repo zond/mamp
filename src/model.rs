@@ -154,27 +154,20 @@ impl ConvLayer {
 // ── Full model: Encoder → Manipulator → Decoder ─────────────────────────────
 
 pub struct MotionMagModel {
-    // Encoder: single-branch (Ha et al. finding: one branch suffices)
-    pub enc_conv1: ConvLayer,   // 3 → 16, k=3, s=1, p=1
-    pub enc_conv2: ConvLayer,   // 16 → 32, k=3, s=2, p=1  (downsample)
-    pub enc_conv3: ConvLayer,   // 32 → 32, k=3, s=1, p=1
+    // Encoder
+    pub enc_conv1: ConvLayer,
+    pub enc_conv2: ConvLayer,
+    pub enc_conv3: ConvLayer,
+    pub enc_texture: ConvLayer,
 
-    // Encoder produces: shape_rep (32ch) and texture_rep (32ch)
-    // Ha et al.: single linear layer for texture branch
-    pub enc_texture: ConvLayer, // 32 → 32, k=1, s=1, p=0
-
-    // Manipulator pipeline (built separately, uses WGSL manipulator shader)
     pub manip_pipeline: ComputePipeline,
 
-    // Decoder: reduced-resolution path (Ha et al. finding #1)
-    pub dec_conv1: ConvLayer,   // 32 → 32, k=3, s=1, p=1
-    // upsample 2×
-    pub dec_conv2: ConvLayer,   // 32 → 16, k=3, s=1, p=1
-    pub dec_conv3: ConvLayer,   // 16 → 3, k=3, s=1, p=1 (no relu)
+    // Decoder
+    pub dec_conv1: ConvLayer,
+    pub dec_conv2: ConvLayer,
+    pub dec_conv3: ConvLayer,
 
     pub upsample_pipeline: ComputePipeline,
-
-    // Frame I/O pipelines
     pub rgba_to_chw_pipeline: ComputePipeline,
     pub chw_to_rgba_pipeline: ComputePipeline,
 
@@ -183,6 +176,26 @@ pub struct MotionMagModel {
     pub height: u32,
     pub latent_width: u32,
     pub latent_height: u32,
+
+    // Pre-allocated intermediate buffers (reused every frame)
+    buf_frame_a: Buffer,
+    buf_frame_b: Buffer,
+    buf_chw_a: Buffer,
+    buf_chw_b: Buffer,
+    buf_enc1_a: Buffer,
+    buf_enc2_a: Buffer,
+    buf_shape_a: Buffer,
+    buf_texture_a: Buffer,
+    buf_enc1_b: Buffer,
+    buf_enc2_b: Buffer,
+    buf_shape_b: Buffer,
+    buf_manip_out: Buffer,
+    buf_dec1: Buffer,
+    buf_upsampled: Buffer,
+    buf_dec2: Buffer,
+    buf_chw_out: Buffer,
+    buf_rgba_out: Buffer,
+    buf_staging: Buffer,
 }
 
 /// Pre-loaded weight data for all layers.
@@ -293,6 +306,11 @@ impl MotionMagModel {
         let rgba_to_chw_pipeline = build_frame_pipeline(ctx, &ctx.rgba_to_chw_module);
         let chw_to_rgba_pipeline = build_frame_pipeline(ctx, &ctx.chw_to_rgba_module);
 
+        let pixels = (w * h) as u64;
+        let latent_pixels = (lw * lh) as u64;
+        let s = BufferUsages::STORAGE;
+        let sc = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+
         Self {
             enc_conv1, enc_conv2, enc_conv3, enc_texture,
             manip_pipeline,
@@ -304,78 +322,85 @@ impl MotionMagModel {
             height: h,
             latent_width: lw,
             latent_height: lh,
+
+            buf_frame_a: ctx.create_buffer("frame_a", pixels * 4, sc),
+            buf_frame_b: ctx.create_buffer("frame_b", pixels * 4, sc),
+            buf_chw_a: ctx.create_buffer("chw_a", 3 * pixels * 4, s),
+            buf_chw_b: ctx.create_buffer("chw_b", 3 * pixels * 4, s),
+            buf_enc1_a: ctx.create_buffer("enc1_a", 16 * pixels * 4, s),
+            buf_enc2_a: ctx.create_buffer("enc2_a", 32 * latent_pixels * 4, s),
+            buf_shape_a: ctx.create_buffer("shape_a", 32 * latent_pixels * 4, s),
+            buf_texture_a: ctx.create_buffer("texture_a", 32 * latent_pixels * 4, s),
+            buf_enc1_b: ctx.create_buffer("enc1_b", 16 * pixels * 4, s),
+            buf_enc2_b: ctx.create_buffer("enc2_b", 32 * latent_pixels * 4, s),
+            buf_shape_b: ctx.create_buffer("shape_b", 32 * latent_pixels * 4, s),
+            buf_manip_out: ctx.create_buffer("manip_out", 32 * latent_pixels * 4, s),
+            buf_dec1: ctx.create_buffer("dec1", 32 * latent_pixels * 4, s),
+            buf_upsampled: ctx.create_buffer("upsampled", 32 * pixels * 4, s),
+            buf_dec2: ctx.create_buffer("dec2", 16 * pixels * 4, s),
+            buf_chw_out: ctx.create_buffer("chw_out", 3 * pixels * 4, s),
+            buf_rgba_out: ctx.create_buffer("rgba_out", pixels * 4, sc),
+            buf_staging: ctx.create_buffer("staging", pixels * 4,
+                BufferUsages::MAP_READ | BufferUsages::COPY_DST),
         }
     }
 
     /// Run the full magnification pipeline on two RGBA frames.
-    /// Returns magnified RGBA pixel data.
+    /// Uses pre-allocated buffers to avoid GPU memory leaks.
     pub fn magnify(
         &self,
         ctx: &GpuContext,
         frame_a_rgba: &[u32],
         frame_b_rgba: &[u32],
         alpha: f32,
-    ) -> Buffer {
+    ) {
         let w = self.width;
         let h = self.height;
         let lw = self.latent_width;
         let lh = self.latent_height;
-        let pixels = (w * h) as usize;
-        let latent_pixels = (lw * lh) as usize;
 
-        // Upload RGBA frames
-        let frame_a_buf = ctx.create_buffer_init("frame_a", bytemuck::cast_slice(frame_a_rgba), BufferUsages::STORAGE);
-        let frame_b_buf = ctx.create_buffer_init("frame_b", bytemuck::cast_slice(frame_b_rgba), BufferUsages::STORAGE);
+        // Upload RGBA frames into pre-allocated buffers
+        ctx.queue.write_buffer(&self.buf_frame_a, 0, bytemuck::cast_slice(frame_a_rgba));
+        ctx.queue.write_buffer(&self.buf_frame_b, 0, bytemuck::cast_slice(frame_b_rgba));
 
         // Convert RGBA → CHW float
-        let chw_a = ctx.create_buffer("chw_a", (3 * pixels * 4) as u64, BufferUsages::STORAGE);
-        let chw_b = ctx.create_buffer("chw_b", (3 * pixels * 4) as u64, BufferUsages::STORAGE);
-        self.run_rgba_to_chw(ctx, &frame_a_buf, &chw_a, w, h);
-        self.run_rgba_to_chw(ctx, &frame_b_buf, &chw_b, w, h);
+        self.run_rgba_to_chw(ctx, &self.buf_frame_a, &self.buf_chw_a, w, h);
+        self.run_rgba_to_chw(ctx, &self.buf_frame_b, &self.buf_chw_b, w, h);
 
-        // Encode both frames
-        let enc1_a = ctx.create_buffer("enc1_a", (16 * pixels * 4) as u64, BufferUsages::STORAGE);
-        let enc2_a = ctx.create_buffer("enc2_a", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-        let shape_a = ctx.create_buffer("shape_a", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-        let texture_a = ctx.create_buffer("texture_a", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
+        // Encode frame A
+        self.enc_conv1.run(ctx, &self.buf_chw_a, &self.buf_enc1_a);
+        self.enc_conv2.run(ctx, &self.buf_enc1_a, &self.buf_enc2_a);
+        self.enc_conv3.run(ctx, &self.buf_enc2_a, &self.buf_shape_a);
+        self.enc_texture.run(ctx, &self.buf_enc2_a, &self.buf_texture_a);
 
-        self.enc_conv1.run(ctx, &chw_a, &enc1_a);
-        self.enc_conv2.run(ctx, &enc1_a, &enc2_a);
-        self.enc_conv3.run(ctx, &enc2_a, &shape_a);
-        self.enc_texture.run(ctx, &enc2_a, &texture_a);
-
-        let enc1_b = ctx.create_buffer("enc1_b", (16 * pixels * 4) as u64, BufferUsages::STORAGE);
-        let enc2_b = ctx.create_buffer("enc2_b", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-        let shape_b = ctx.create_buffer("shape_b", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-
-        self.enc_conv1.run(ctx, &chw_b, &enc1_b);
-        self.enc_conv2.run(ctx, &enc1_b, &enc2_b);
-        self.enc_conv3.run(ctx, &enc2_b, &shape_b);
+        // Encode frame B
+        self.enc_conv1.run(ctx, &self.buf_chw_b, &self.buf_enc1_b);
+        self.enc_conv2.run(ctx, &self.buf_enc1_b, &self.buf_enc2_b);
+        self.enc_conv3.run(ctx, &self.buf_enc2_b, &self.buf_shape_b);
 
         // Manipulate: amplify motion
-        let manip_out = ctx.create_buffer("manip_out", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-        self.run_manipulator(ctx, &shape_a, &shape_b, &texture_a, &manip_out, 32, lh, lw, alpha);
+        self.run_manipulator(ctx, &self.buf_shape_a, &self.buf_shape_b,
+            &self.buf_texture_a, &self.buf_manip_out, 32, lh, lw, alpha);
 
         // Decode
-        let dec1_out = ctx.create_buffer("dec1", (32 * latent_pixels * 4) as u64, BufferUsages::STORAGE);
-        self.dec_conv1.run(ctx, &manip_out, &dec1_out);
-
-        // Upsample 2× back to full resolution
-        let upsampled = ctx.create_buffer("upsampled", (32 * pixels * 4) as u64, BufferUsages::STORAGE);
-        self.run_upsample(ctx, &dec1_out, &upsampled, 32, lh, lw, h, w);
-
-        let dec2_out = ctx.create_buffer("dec2", (16 * pixels * 4) as u64, BufferUsages::STORAGE);
-        self.dec_conv2.run(ctx, &upsampled, &dec2_out);
-
-        let chw_out = ctx.create_buffer("chw_out", (3 * pixels * 4) as u64, BufferUsages::STORAGE);
-        self.dec_conv3.run(ctx, &dec2_out, &chw_out);
+        self.dec_conv1.run(ctx, &self.buf_manip_out, &self.buf_dec1);
+        self.run_upsample(ctx, &self.buf_dec1, &self.buf_upsampled, 32, lh, lw, h, w);
+        self.dec_conv2.run(ctx, &self.buf_upsampled, &self.buf_dec2);
+        self.dec_conv3.run(ctx, &self.buf_dec2, &self.buf_chw_out);
 
         // Convert CHW → RGBA
-        let rgba_out = ctx.create_buffer("rgba_out", (pixels * 4) as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC);
-        self.run_chw_to_rgba(ctx, &chw_out, &rgba_out, w, h);
+        self.run_chw_to_rgba(ctx, &self.buf_chw_out, &self.buf_rgba_out, w, h);
 
-        rgba_out
+        // Copy to staging for readback
+        let mut encoder = ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("readback") },
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.buf_rgba_out, 0,
+            &self.buf_staging, 0,
+            (w * h * 4) as u64,
+        );
+        ctx.queue.submit(std::iter::once(encoder.finish()));
     }
 
     fn run_rgba_to_chw(&self, ctx: &GpuContext, input: &Buffer, output: &Buffer, w: u32, h: u32) {

@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wgpu::BufferUsages;
 
 use gpu::GpuContext;
 use model::{ModelWeights, MotionMagModel};
@@ -95,6 +94,40 @@ async fn load_weights() -> ModelWeights {
     }
 }
 
+/// Called from JS when the user picks a camera.
+#[wasm_bindgen]
+pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
+    let window = web_sys::window().unwrap();
+    // Access the shared state stored on window.__mamp_state
+    let state_js = js_sys::Reflect::get(&window, &"__mamp_state".into())?;
+    if state_js.is_undefined() {
+        return Err(JsValue::from_str("Not initialized yet"));
+    }
+    // The state is stored as a leaked pointer
+    let ptr = state_js.as_f64().unwrap() as usize;
+    let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
+
+    {
+        let mut s = state.borrow_mut();
+        s.running = false;
+        s.prev_frame = None;
+    }
+
+    // Start capture with new device
+    {
+        let s = state.borrow();
+        s.capture.start_with_device(device_id).await?;
+    }
+
+    {
+        let mut s = state.borrow_mut();
+        s.running = true;
+    }
+    request_animation_frame(state.clone());
+
+    Ok(())
+}
+
 /// Main WASM entry point.
 #[wasm_bindgen(start)]
 pub async fn start() -> Result<(), JsValue> {
@@ -111,7 +144,7 @@ pub async fn start() -> Result<(), JsValue> {
     log::info!("Model built: {}x{}, latent {}x{}", WIDTH, HEIGHT, model.latent_width, model.latent_height);
 
     let capture = VideoCapture::new(WIDTH, HEIGHT)?;
-    capture.start().await?;
+    capture.start_with_device("").await?;
     log::info!("Camera stream active");
 
     let renderer = OutputRenderer::new("output", WIDTH, HEIGHT)?;
@@ -126,6 +159,11 @@ pub async fn start() -> Result<(), JsValue> {
         running: true,
     }));
 
+    // Leak a reference so JS can call start_with_camera later
+    let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
+    let window = web_sys::window().unwrap();
+    js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(state_ptr as f64))?;
+
     request_animation_frame(state.clone());
 
     // Expose alpha control to JS
@@ -133,8 +171,6 @@ pub async fn start() -> Result<(), JsValue> {
     let set_alpha = Closure::wrap(Box::new(move |alpha: f32| {
         state_for_js.borrow_mut().alpha = alpha;
     }) as Box<dyn FnMut(f32)>);
-
-    let window = web_sys::window().unwrap();
     js_sys::Reflect::set(&window, &"setMagnification".into(), set_alpha.as_ref())?;
     set_alpha.forget();
 
@@ -147,7 +183,6 @@ pub async fn start() -> Result<(), JsValue> {
             request_animation_frame(state_for_toggle.clone());
         }
     }) as Box<dyn FnMut()>);
-
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
@@ -189,7 +224,6 @@ fn request_animation_frame(state: Rc<RefCell<AppState>>) {
         .unwrap();
 }
 
-/// Process one frame: grab camera, run model, render output.
 fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     let mut s = state.borrow_mut();
     if !s.running {
@@ -205,28 +239,12 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     };
 
     if let Some(ref prev) = s.prev_frame {
-        let t0 = web_sys::window().unwrap().performance().unwrap().now();
+        // Run model on GPU using pre-allocated buffers
+        s.model.magnify(&s.ctx, prev, &current_frame, s.alpha);
 
-        let output_buf = s.model.magnify(&s.ctx, prev, &current_frame, s.alpha);
-
-        // Read back output pixels via staging buffer
-        let staging = s.ctx.create_buffer(
-            "staging",
-            (WIDTH * HEIGHT * 4) as u64,
-            BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        );
-
-        let mut encoder = s.ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("readback") },
-        );
-        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging, 0, (WIDTH * HEIGHT * 4) as u64);
-        s.ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        // Render input frame while GPU processes (async readback would be production path)
+        // For now render the camera input directly.
+        // TODO: async readback from buf_staging for magnified output.
         let _ = s.renderer.draw(&current_frame);
-
-        let t1 = web_sys::window().unwrap().performance().unwrap().now();
-        log::info!("Frame time: {:.1}ms", t1 - t0);
     }
 
     s.prev_frame = Some(current_frame);

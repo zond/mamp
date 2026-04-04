@@ -16,36 +16,26 @@
             min-height: 100vh;
             padding: 2rem;
         }
-        h1 {
-            font-size: 1.4rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: #fff;
-        }
-        .subtitle {
-            font-size: 0.85rem;
-            color: #888;
-            margin-bottom: 1.5rem;
-        }
+        h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 0.5rem; color: #fff; }
+        .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
         #output {
             border: 1px solid #333;
             border-radius: 8px;
             background: #111;
+            max-width: 90vw;
+            width: 480px;
+            aspect-ratio: 4/3;
         }
         .controls {
-            margin-top: 1.5rem;
+            margin-top: 1rem;
             display: flex;
             align-items: center;
             gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
         }
-        label {
-            font-size: 0.9rem;
-            color: #aaa;
-        }
-        input[type="range"] {
-            width: 200px;
-            accent-color: #6c5ce7;
-        }
+        label { font-size: 0.9rem; color: #aaa; }
+        input[type="range"] { width: 160px; accent-color: #6c5ce7; }
         #alpha-val {
             font-variant-numeric: tabular-nums;
             min-width: 3ch;
@@ -53,33 +43,30 @@
             color: #6c5ce7;
             font-weight: 700;
         }
-        button {
-            padding: 0.5rem 1.2rem;
+        button, select {
+            padding: 0.5rem 1rem;
             border: 1px solid #444;
             border-radius: 6px;
             background: #1a1a2e;
             color: #e0e0e0;
             cursor: pointer;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }
-        button:hover { background: #2a2a4e; }
-        #status {
-            margin-top: 1rem;
-            font-size: 0.8rem;
-            color: #666;
-        }
+        button:hover, select:hover { background: #2a2a4e; }
+        select { max-width: 200px; }
+        #status { margin-top: 1rem; font-size: 0.8rem; color: #666; }
         .error { color: #e74c3c !important; }
         #debug-log {
             margin-top: 1rem;
             width: 600px;
             max-width: 90vw;
-            height: 200px;
+            height: 150px;
             background: #111;
             border: 1px solid #333;
             border-radius: 6px;
             color: #0f0;
             font-family: monospace;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             padding: 0.5rem;
             overflow-y: auto;
             white-space: pre-wrap;
@@ -94,6 +81,9 @@
     <canvas id="output" width="480" height="360"></canvas>
 
     <div class="controls">
+        <label for="camera">Camera</label>
+        <select id="camera"><option value="">Loading...</option></select>
+
         <label for="alpha">&alpha;</label>
         <input type="range" id="alpha" min="1" max="100" value="20" step="1">
         <span id="alpha-val">20&times;</span>
@@ -104,80 +94,84 @@
     <div id="debug-log"></div>
 
     <script type="module">
-        // ── Debug log capture ──
         const debugEl = document.getElementById('debug-log');
         const logLines = [];
         function dbg(msg) {
             const ts = new Date().toISOString().slice(11, 23);
-            const line = `[${ts}] ${msg}`;
-            logLines.push(line);
+            logLines.push(`[${ts}] ${msg}`);
             debugEl.textContent = logLines.join('\n');
             debugEl.scrollTop = debugEl.scrollHeight;
         }
-
-        // Intercept console.log/warn/error/info
-        for (const level of ['log', 'info', 'warn', 'error']) {
-            const orig = console[level].bind(console);
-            console[level] = (...args) => {
-                orig(...args);
-                dbg(`[${level}] ${args.map(a => {
-                    try { return typeof a === 'object' ? JSON.stringify(a) : String(a); }
-                    catch { return String(a); }
-                }).join(' ')}`);
-            };
+        for (const lvl of ['log','info','warn','error']) {
+            const orig = console[lvl].bind(console);
+            console[lvl] = (...a) => { orig(...a); dbg(`[${lvl}] ${a.map(x => { try { return typeof x==='object'?JSON.stringify(x):String(x); } catch{return String(x);} }).join(' ')}`); };
         }
+        window.addEventListener('error', e => dbg(`[UNCAUGHT] ${e.message} at ${e.filename}:${e.lineno}`));
+        window.addEventListener('unhandledrejection', e => dbg(`[UNHANDLED] ${e.reason}`));
 
-        // Capture unhandled errors and rejections
-        window.addEventListener('error', e => {
-            dbg(`[UNCAUGHT] ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`);
-        });
-        window.addEventListener('unhandledrejection', e => {
-            dbg(`[UNHANDLED PROMISE] ${e.reason}`);
-        });
-
-        // Copy log button
         document.getElementById('copy-log').addEventListener('click', () => {
-            navigator.clipboard.writeText(logLines.join('\n')).then(() => {
-                document.getElementById('copy-log').textContent = 'Copied!';
-                setTimeout(() => document.getElementById('copy-log').textContent = 'Copy Log', 1500);
-            }, () => {
-                // Fallback for no clipboard API
-                const ta = document.createElement('textarea');
-                ta.value = logLines.join('\n');
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                ta.remove();
-                document.getElementById('copy-log').textContent = 'Copied!';
-                setTimeout(() => document.getElementById('copy-log').textContent = 'Copy Log', 1500);
-            });
+            navigator.clipboard.writeText(logLines.join('\n')).then(
+                () => { document.getElementById('copy-log').textContent = 'Copied!'; setTimeout(() => document.getElementById('copy-log').textContent = 'Copy Log', 1500); },
+                () => {}
+            );
         });
+
+        // ── Camera enumeration ──
+        async function populateCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const cams = devices.filter(d => d.kind === 'videoinput');
+                const sel = document.getElementById('camera');
+                sel.innerHTML = '';
+                cams.forEach((cam, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = cam.deviceId;
+                    opt.textContent = cam.label || `Camera ${i + 1}`;
+                    sel.appendChild(opt);
+                });
+                dbg(`Found ${cams.length} camera(s)`);
+            } catch (e) {
+                dbg(`Camera enumeration failed: ${e}`);
+            }
+        }
 
         // ── Main init ──
         async function init() {
             const status = document.getElementById('status');
-
             dbg('Page loaded, checking WebGPU...');
             dbg(`navigator.gpu: ${!!navigator.gpu}`);
-            dbg(`userAgent: ${navigator.userAgent}`);
 
             if (!navigator.gpu) {
-                const msg = 'WebGPU not supported in this browser. Try Chrome 113+ or Edge 113+.';
-                status.textContent = msg;
+                status.textContent = 'WebGPU not supported. Try Chrome 113+.';
                 status.classList.add('error');
-                dbg(msg);
                 return;
             }
 
             try {
-                dbg('WebGPU detected. Importing WASM module...');
+                dbg('Importing WASM module...');
                 const wasm = await import('./motion_mag_webgpu.js');
-                dbg('WASM JS module loaded. Calling default() to init WASM...');
+                dbg('Calling WASM default()...');
                 await wasm.default();
-                dbg('WASM initialized successfully.');
+                dbg('WASM initialized.');
 
-                status.textContent = 'Running — motion magnification active';
+                status.textContent = 'Running';
 
+                // Populate cameras now that we have permission
+                await populateCameras();
+
+                // Camera switch
+                document.getElementById('camera').addEventListener('change', async (e) => {
+                    const deviceId = e.target.value;
+                    dbg(`Switching to camera: ${deviceId}`);
+                    try {
+                        await wasm.start_with_camera(deviceId);
+                        dbg('Camera switched.');
+                    } catch (err) {
+                        dbg(`Camera switch failed: ${err}`);
+                    }
+                });
+
+                // Alpha slider
                 const slider = document.getElementById('alpha');
                 const alphaVal = document.getElementById('alpha-val');
                 slider.addEventListener('input', () => {
@@ -186,18 +180,17 @@
                     if (window.setMagnification) window.setMagnification(v);
                 });
 
-                const toggle = document.getElementById('toggle');
-                toggle.addEventListener('click', () => {
+                // Pause/resume
+                document.getElementById('toggle').addEventListener('click', function() {
                     if (window.toggleMagnification) window.toggleMagnification();
-                    toggle.textContent = toggle.textContent === 'Pause' ? 'Resume' : 'Pause';
+                    this.textContent = this.textContent === 'Pause' ? 'Resume' : 'Pause';
                 });
 
             } catch (e) {
-                const msg = `Error: ${e.message || e}`;
-                status.textContent = msg;
+                status.textContent = `Error: ${e.message || e}`;
                 status.classList.add('error');
-                dbg(`[CATCH] ${msg}`);
-                dbg(`[STACK] ${e.stack || 'no stack'}`);
+                dbg(`[CATCH] ${e.message || e}`);
+                dbg(`[STACK] ${e.stack || 'n/a'}`);
             }
         }
 

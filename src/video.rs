@@ -17,11 +17,9 @@ pub struct VideoCapture {
 }
 
 impl VideoCapture {
-    /// Create a video capture at the given resolution.
     pub fn new(width: u32, height: u32) -> Result<Self, JsValue> {
         let document = web_sys::window().unwrap().document().unwrap();
 
-        // Hidden video element for camera stream
         let video = document
             .create_element("video")?
             .dyn_into::<HtmlVideoElement>()?;
@@ -32,7 +30,6 @@ impl VideoCapture {
         video.set_attribute("style", "display:none")?;
         document.body().unwrap().append_child(&video)?;
 
-        // Offscreen canvas for pixel extraction
         let canvas = document
             .create_element("canvas")?
             .dyn_into::<HtmlCanvasElement>()?;
@@ -49,14 +46,13 @@ impl VideoCapture {
         Ok(Self { video, _canvas: canvas, ctx2d, width, height })
     }
 
-    /// Request camera access and start the stream.
-    pub async fn start(&self) -> Result<(), JsValue> {
+    /// Start camera with optional device ID (empty string = default camera).
+    pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
         let navigator = window.navigator();
         let media_devices = navigator.media_devices()?;
 
         let constraints = MediaStreamConstraints::new();
-        // Build video constraints with resolution
         let video_constraints = js_sys::Object::new();
         js_sys::Reflect::set(
             &video_constraints,
@@ -68,6 +64,11 @@ impl VideoCapture {
             &"height".into(),
             &JsValue::from(self.height),
         )?;
+        if !device_id.is_empty() {
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
+            js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
+        }
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
@@ -77,15 +78,12 @@ impl VideoCapture {
         self.video
             .set_src_object(Some(&stream.unchecked_into::<web_sys::MediaStream>()));
 
-        // Wait for video to be ready
-        let video = self.video.clone();
-        let play_promise = video.play()?;
+        let play_promise = self.video.play()?;
         wasm_bindgen_futures::JsFuture::from(play_promise).await?;
 
         Ok(())
     }
 
-    /// Grab the current frame as packed RGBA u32 values.
     pub fn grab_frame(&self) -> Result<Vec<u32>, JsValue> {
         self.ctx2d.draw_image_with_html_video_element_and_dw_and_dh(
             &self.video,
@@ -102,7 +100,6 @@ impl VideoCapture {
 
         let raw: Vec<u8> = image_data.data().0;
 
-        // Pack RGBA bytes into u32
         let pixels: Vec<u32> = raw
             .chunks_exact(4)
             .map(|c| {
@@ -143,9 +140,7 @@ impl OutputRenderer {
         Ok(Self { _canvas: canvas, ctx2d, width, height })
     }
 
-    /// Blit packed RGBA u32 pixels onto the canvas.
     pub fn draw(&self, pixels: &[u32]) -> Result<(), JsValue> {
-        // Unpack u32 → RGBA bytes
         let mut bytes = Vec::with_capacity(pixels.len() * 4);
         for &p in pixels {
             bytes.push((p & 0xFF) as u8);

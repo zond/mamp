@@ -31,8 +31,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let x = u32(in.uv.x * f32(params.width));
-    let y = u32(in.uv.y * f32(params.height));
+    let x = min(u32(in.uv.x * f32(params.width)), params.width - 1u);
+    let y = min(u32(in.uv.y * f32(params.height)), params.height - 1u);
     let idx = y * params.width + x;
     let packed = pixels[idx];
     let r = f32(packed & 0xFFu) / 255.0;

@@ -205,10 +205,7 @@
 
                 status.textContent = 'Running';
 
-                // Re-enumerate cameras now that permission is granted
-                await populateCameras();
-
-                // Populate cameras now that we have permission
+                // Enumerate cameras now that permission is granted
                 await populateCameras();
 
                 // Camera switch

@@ -174,14 +174,17 @@ pub async fn start() -> Result<(), JsValue> {
     set_fh.forget();
 
     let s4 = state.clone();
-    let toggle = Closure::wrap(Box::new(move || { s4.borrow_mut().running = !s4.borrow().running; }) as Box<dyn FnMut()>);
+    let toggle = Closure::wrap(Box::new(move || { let mut s = s4.borrow_mut(); s.running = !s.running; }) as Box<dyn FnMut()>);
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
     let s5 = state.clone();
     let set_res = Closure::wrap(Box::new(move |max_w: u32| {
-        let mut s = s5.borrow_mut();
-        rebuild_evm(&mut s, max_w);
+        if let Ok(mut s) = s5.try_borrow_mut() {
+            rebuild_evm(&mut s, max_w);
+        } else {
+            log::warn!("Resolution change deferred — frame in progress");
+        }
     }) as Box<dyn FnMut(u32)>);
     js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
     set_res.forget();

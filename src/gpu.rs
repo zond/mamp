@@ -24,11 +24,16 @@ impl GpuContext {
         // present to this canvas.  Without this, get_capabilities() may
         // return empty formats on some devices (especially mobile Chrome on
         // Android) and rendering silently produces a black canvas.
-        let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
-            .document().unwrap()
-            .get_element_by_id("output").unwrap()
-            .dyn_into().unwrap();
-        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window()
+            .unwrap()
+            .document()
+            .unwrap()
+            .get_element_by_id("output")
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .expect("Failed to create surface");
 
         log::info!("Requesting WebGPU adapter (compatible with surface)...");
@@ -42,7 +47,10 @@ impl GpuContext {
         {
             Ok(a) => a,
             Err(e) => {
-                log::warn!("High-performance adapter failed: {:?}, trying low power...", e);
+                log::warn!(
+                    "High-performance adapter failed: {:?}, trying low power...",
+                    e
+                );
                 instance
                     .request_adapter(&RequestAdapterOptions {
                         power_preference: PowerPreference::LowPower,
@@ -81,20 +89,21 @@ impl GpuContext {
         // Drop the temporary surface — we'll create the real one after we know the resolution
         drop(surface);
 
-        Self { instance, adapter, device, queue, rgba_to_chw_module, chw_to_rgba_module }
-    }
-
-    pub fn create_buffer_init(&self, label: &str, data: &[f32], usage: BufferUsages) -> Buffer {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(data),
-            usage,
-        })
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            rgba_to_chw_module,
+            chw_to_rgba_module,
+        }
     }
 
     pub fn create_buffer(&self, label: &str, size: u64, usage: BufferUsages) -> Buffer {
         self.device.create_buffer(&BufferDescriptor {
-            label: Some(label), size, usage,
+            label: Some(label),
+            size,
+            usage,
             mapped_at_creation: false,
         })
     }
@@ -119,6 +128,6 @@ impl GpuContext {
     }
 
     pub fn div_ceil(a: u32, b: u32) -> u32 {
-        (a + b - 1) / b
+        a.div_ceil(b)
     }
 }

@@ -3,8 +3,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, HtmlVideoElement,
-    MediaStreamConstraints,
+    CanvasRenderingContext2d, HtmlCanvasElement, HtmlVideoElement, MediaStreamConstraints,
 };
 
 /// Manages camera capture and frame extraction.
@@ -45,7 +44,13 @@ impl VideoCapture {
             .unwrap()
             .dyn_into::<CanvasRenderingContext2d>()?;
 
-        Ok(Self { video, _canvas: canvas, ctx2d, width, height })
+        Ok(Self {
+            video,
+            _canvas: canvas,
+            ctx2d,
+            width,
+            height,
+        })
     }
 
     /// Start camera with optional device ID (empty string = default camera).
@@ -97,7 +102,9 @@ impl VideoCapture {
         // Wait a moment for the video to report its actual dimensions
         let promise = js_sys::Promise::new(&mut |resolve, _| {
             let window = web_sys::window().unwrap();
-            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 200).unwrap();
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 200)
+                .unwrap();
         });
         wasm_bindgen_futures::JsFuture::from(promise).await?;
 
@@ -108,7 +115,11 @@ impl VideoCapture {
     pub fn actual_size(&self) -> (u32, u32) {
         let vw = self.video.video_width();
         let vh = self.video.video_height();
-        if vw > 0 && vh > 0 { (vw, vh) } else { (self.width, self.height) }
+        if vw > 0 && vh > 0 {
+            (vw, vh)
+        } else {
+            (self.width, self.height)
+        }
     }
 
     /// Resize internal capture canvas to match new dimensions.
@@ -122,31 +133,26 @@ impl VideoCapture {
     /// Grab the current video frame into a caller-provided buffer, reusing its
     /// allocation.  The buffer is cleared and refilled each call.
     pub fn grab_frame_into(&self, dest: &mut Vec<u32>) -> Result<(), JsValue> {
-        self.ctx2d.draw_image_with_html_video_element_and_dw_and_dh(
-            &self.video,
-            0.0, 0.0,
-            self.width as f64,
-            self.height as f64,
-        )?;
+        self.ctx2d
+            .draw_image_with_html_video_element_and_dw_and_dh(
+                &self.video,
+                0.0,
+                0.0,
+                self.width as f64,
+                self.height as f64,
+            )?;
 
-        let image_data = self.ctx2d.get_image_data(
-            0.0, 0.0,
-            self.width as f64,
-            self.height as f64,
-        )?;
+        let image_data =
+            self.ctx2d
+                .get_image_data(0.0, 0.0, self.width as f64, self.height as f64)?;
 
         let raw: Vec<u8> = image_data.data().0;
 
         dest.clear();
         dest.extend(raw.chunks_exact(4).map(|c| {
-            (c[0] as u32)
-                | ((c[1] as u32) << 8)
-                | ((c[2] as u32) << 16)
-                | ((c[3] as u32) << 24)
+            (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
         }));
 
         Ok(())
     }
-
 }
-

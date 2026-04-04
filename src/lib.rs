@@ -14,8 +14,9 @@ use gpu::GpuContext;
 use model::{ModelWeights, MotionMagModel};
 use video::{OutputRenderer, VideoCapture};
 
-const WIDTH: u32 = 480;
-const HEIGHT: u32 = 360;
+// Max processing resolution (scaled down from camera native).
+// Must be divisible by 2 for the stride-2 encoder.
+const MAX_WIDTH: u32 = 480;
 
 /// State shared across animation frames.
 struct AppState {
@@ -26,9 +27,10 @@ struct AppState {
     prev_frame: Option<Vec<u32>>,
     alpha: f32,
     running: bool,
+    width: u32,
+    height: u32,
 }
 
-/// Load trained weights from server, or fall back to random initialization.
 async fn load_weights() -> ModelWeights {
     let layer_specs: &[(&str, usize)] = &[
         ("enc_conv1.weight", 16 * 3 * 3 * 3),
@@ -94,16 +96,31 @@ async fn load_weights() -> ModelWeights {
     }
 }
 
+/// Compute processing resolution from camera native size.
+/// Scales down to MAX_WIDTH, keeps aspect ratio, ensures even dimensions.
+fn processing_size(cam_w: u32, cam_h: u32) -> (u32, u32) {
+    let (mut w, mut h) = if cam_w > MAX_WIDTH {
+        let scale = MAX_WIDTH as f64 / cam_w as f64;
+        ((cam_w as f64 * scale) as u32, (cam_h as f64 * scale) as u32)
+    } else {
+        (cam_w, cam_h)
+    };
+    // Ensure even (required for stride-2 encoder)
+    w &= !1;
+    h &= !1;
+    if w == 0 { w = 2; }
+    if h == 0 { h = 2; }
+    (w, h)
+}
+
 /// Called from JS when the user picks a camera.
 #[wasm_bindgen]
 pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     let window = web_sys::window().unwrap();
-    // Access the shared state stored on window.__mamp_state
     let state_js = js_sys::Reflect::get(&window, &"__mamp_state".into())?;
     if state_js.is_undefined() {
         return Err(JsValue::from_str("Not initialized yet"));
     }
-    // The state is stored as a leaked pointer
     let ptr = state_js.as_f64().unwrap() as usize;
     let state: &Rc<RefCell<AppState>> = unsafe { &*(ptr as *const Rc<RefCell<AppState>>) };
 
@@ -115,8 +132,26 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
     // Start capture with new device
     {
-        let s = state.borrow();
+        let mut s = state.borrow_mut();
         s.capture.start_with_device(device_id).await?;
+
+        // Detect actual camera resolution and rebuild if changed
+        let (cam_w, cam_h) = s.capture.actual_size();
+        let (w, h) = processing_size(cam_w, cam_h);
+        log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
+
+        if w != s.width || h != s.height {
+            s.capture.resize(w, h);
+            let weights = ModelWeights::random(); // Use existing weights ideally
+            s.model = MotionMagModel::new(&s.ctx, w, h, &weights);
+            s.renderer = OutputRenderer::new("output", w, h)?;
+            s.width = w;
+            s.height = h;
+
+            // Tell JS the new aspect ratio
+            let ratio = w as f64 / h as f64;
+            js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
+        }
     }
 
     {
@@ -128,7 +163,6 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
-/// Main WASM entry point.
 #[wasm_bindgen(start)]
 pub async fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -139,15 +173,24 @@ pub async fn start() -> Result<(), JsValue> {
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
 
-    let weights = load_weights().await;
-    let model = MotionMagModel::new(&ctx, WIDTH, HEIGHT, &weights);
-    log::info!("Model built: {}x{}, latent {}x{}", WIDTH, HEIGHT, model.latent_width, model.latent_height);
-
-    let capture = VideoCapture::new(WIDTH, HEIGHT)?;
+    // Start camera first to detect resolution
+    let mut capture = VideoCapture::new(MAX_WIDTH, MAX_WIDTH * 3 / 4)?;
     capture.start_with_device("").await?;
-    log::info!("Camera stream active");
+    let (cam_w, cam_h) = capture.actual_size();
+    let (w, h) = processing_size(cam_w, cam_h);
+    log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
+    capture.resize(w, h);
 
-    let renderer = OutputRenderer::new("output", WIDTH, HEIGHT)?;
+    // Tell JS the aspect ratio
+    let window = web_sys::window().unwrap();
+    let ratio = w as f64 / h as f64;
+    js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
+
+    let weights = load_weights().await;
+    let model = MotionMagModel::new(&ctx, w, h, &weights);
+    log::info!("Model built: {}x{}, latent {}x{}", w, h, model.latent_width, model.latent_height);
+
+    let renderer = OutputRenderer::new("output", w, h)?;
 
     let state = Rc::new(RefCell::new(AppState {
         ctx,
@@ -157,16 +200,15 @@ pub async fn start() -> Result<(), JsValue> {
         prev_frame: None,
         alpha: 20.0,
         running: true,
+        width: w,
+        height: h,
     }));
 
-    // Leak a reference so JS can call start_with_camera later
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
-    let window = web_sys::window().unwrap();
     js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(state_ptr as f64))?;
 
     request_animation_frame(state.clone());
 
-    // Expose alpha control to JS
     let state_for_js = state.clone();
     let set_alpha = Closure::wrap(Box::new(move |alpha: f32| {
         state_for_js.borrow_mut().alpha = alpha;
@@ -239,11 +281,7 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     };
 
     if let Some(ref prev) = s.prev_frame {
-        // Run model on GPU using pre-allocated buffers
         s.model.magnify(&s.ctx, prev, &current_frame, s.alpha);
-
-        // For now render the camera input directly.
-        // TODO: async readback from buf_staging for magnified output.
         let _ = s.renderer.draw(&current_frame);
     }
 

@@ -24,7 +24,6 @@
             background: #111;
             max-width: 90vw;
             width: 480px;
-            aspect-ratio: 4/3;
         }
         .controls {
             margin-top: 1rem;
@@ -154,6 +153,13 @@
                 await wasm.default();
                 dbg('WASM initialized.');
 
+                // Set canvas aspect from detected camera resolution
+                if (window.__mamp_aspect) {
+                    const canvas = document.getElementById('output');
+                    canvas.style.aspectRatio = String(window.__mamp_aspect);
+                    dbg(`Aspect ratio: ${window.__mamp_aspect.toFixed(3)}`);
+                }
+
                 status.textContent = 'Running';
 
                 // Populate cameras now that we have permission
@@ -165,6 +171,9 @@
                     dbg(`Switching to camera: ${deviceId}`);
                     try {
                         await wasm.start_with_camera(deviceId);
+                        if (window.__mamp_aspect) {
+                            document.getElementById('output').style.aspectRatio = String(window.__mamp_aspect);
+                        }
                         dbg('Camera switched.');
                     } catch (err) {
                         dbg(`Camera switch failed: ${err}`);

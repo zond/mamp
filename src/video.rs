@@ -92,7 +92,29 @@ impl VideoCapture {
         let play_promise = self.video.play()?;
         wasm_bindgen_futures::JsFuture::from(play_promise).await?;
 
+        // Wait a moment for the video to report its actual dimensions
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            let window = web_sys::window().unwrap();
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 200).unwrap();
+        });
+        wasm_bindgen_futures::JsFuture::from(promise).await?;
+
         Ok(())
+    }
+
+    /// Get the camera's actual resolution (may differ from requested).
+    pub fn actual_size(&self) -> (u32, u32) {
+        let vw = self.video.video_width();
+        let vh = self.video.video_height();
+        if vw > 0 && vh > 0 { (vw, vh) } else { (self.width, self.height) }
+    }
+
+    /// Resize internal capture canvas to match new dimensions.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self._canvas.set_width(width);
+        self._canvas.set_height(height);
     }
 
     pub fn grab_frame(&self) -> Result<Vec<u32>, JsValue> {

@@ -37,10 +37,21 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let x = u32(in.uv.x * f32(params.width));
-    let y = u32(in.uv.y * f32(params.height));
+    let x = min(u32(in.uv.x * f32(params.width)), params.width - 1u);
+    let y = min(u32(in.uv.y * f32(params.height)), params.height - 1u);
     let idx = y * params.width + x;
+
+    // Safety: check bounds (buffer might be smaller than expected)
+    let buf_size = params.width * params.height;
+    if idx >= buf_size {
+        return vec4(1.0, 0.0, 0.0, 1.0); // red = out of bounds
+    }
+
     let packed = pixels[idx];
+    if packed == 0u {
+        // DEBUG: green tint if pixel is zero (helps distinguish "no data" from "black pixel")
+        return vec4(0.0, 0.05, 0.0, 1.0);
+    }
 
     let r = f32(packed & 0xFFu) / 255.0;
     let g = f32((packed >> 8u) & 0xFFu) / 255.0;

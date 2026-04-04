@@ -99,7 +99,8 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
         s.running = true;
     }
 
-    wasm_bindgen_futures::spawn_local(run_loop(state.clone()));
+    // Don't spawn a new run_loop — the existing one is still alive,
+    // polling s.running. It will resume on the next iteration.
     Ok(())
 }
 

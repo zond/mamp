@@ -29,12 +29,17 @@
             margin-top: 1rem;
             display: flex;
             align-items: center;
-            gap: 1rem;
+            gap: 0.75rem;
             flex-wrap: wrap;
             justify-content: center;
         }
-        label { font-size: 0.9rem; color: #aaa; }
-        input[type="range"] { width: 160px; accent-color: #6c5ce7; }
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        label { font-size: 0.9rem; color: #aaa; white-space: nowrap; }
+        input[type="range"] { width: 100px; accent-color: #6c5ce7; }
         #alpha-val {
             font-variant-numeric: tabular-nums;
             min-width: 3ch;
@@ -83,17 +88,21 @@
         <label for="camera">Camera</label>
         <select id="camera"><option value="">Loading...</option></select>
 
-        <label for="alpha">Amplify</label>
-        <input type="range" id="alpha" min="1" max="200" value="30" step="1">
-        <span id="alpha-val">30&times;</span>
-
-        <label for="freq-low">Low Hz</label>
-        <input type="range" id="freq-low" min="0.1" max="5" value="0.5" step="0.1">
-        <span id="freq-low-val">0.5</span>
-
-        <label for="freq-high">High Hz</label>
-        <input type="range" id="freq-high" min="0.5" max="30" value="3.0" step="0.5">
-        <span id="freq-high-val">3.0</span>
+        <span class="slider-group">
+            <label for="alpha">Amplify</label>
+            <input type="range" id="alpha" min="1" max="200" value="30" step="1">
+            <span id="alpha-val">30&times;</span>
+        </span>
+        <span class="slider-group">
+            <label for="freq-low">Low Hz</label>
+            <input type="range" id="freq-low" min="0.1" max="5" value="0.5" step="0.1">
+            <span id="freq-low-val">0.5</span>
+        </span>
+        <span class="slider-group">
+            <label for="freq-high">High Hz</label>
+            <input type="range" id="freq-high" min="0.5" max="30" value="3.0" step="0.5">
+            <span id="freq-high-val">3.0</span>
+        </span>
 
         <button id="toggle">Pause</button>
         <button id="copy-log">Copy Log</button>

@@ -13,8 +13,7 @@ use evm::EvmPipeline;
 use gpu::GpuContext;
 use video::VideoCapture;
 
-const TARGET_FPS: f32 = 24.0;
-const DOWNSCALE_STEPS: &[u32] = &[4096, 1920, 1280, 960, 640, 480, 320];
+const DEFAULT_MAX_WIDTH: u32 = 640;
 
 struct AppState {
     ctx: GpuContext,
@@ -89,7 +88,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
     {
         let mut s = state.borrow_mut();
         let (cam_w, cam_h) = s.capture.actual_size();
-        let (w, h) = processing_size(cam_w, cam_h, DOWNSCALE_STEPS[0]);
+        let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
 
         if w != s.width || h != s.height {
@@ -97,7 +96,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
             let canvas = get_canvas();
             canvas.set_width(w);
             canvas.set_height(h);
-            s.evm = EvmPipeline::new(&s.ctx, &s.ctx.instance, canvas, w, h);
+            s.evm = EvmPipeline::new(&s.ctx, w, h);
             s.width = w;
             s.height = h;
 
@@ -120,11 +119,11 @@ pub async fn start() -> Result<(), JsValue> {
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
 
-    let initial_max = DOWNSCALE_STEPS[0];
+    let initial_max = DEFAULT_MAX_WIDTH;
     let mut capture = VideoCapture::new(initial_max, initial_max * 3 / 4)?;
     capture.start_with_device("").await?;
     let (cam_w, cam_h) = capture.actual_size();
-    let (w, h) = processing_size(cam_w, cam_h, DOWNSCALE_STEPS[0]);
+    let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
     log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
     capture.resize(w, h);
 
@@ -135,7 +134,7 @@ pub async fn start() -> Result<(), JsValue> {
     let canvas = get_canvas();
     canvas.set_width(w);
     canvas.set_height(h);
-    let evm = EvmPipeline::new(&ctx, &ctx.instance, canvas, w, h);
+    let evm = EvmPipeline::new(&ctx, w, h);
     log::info!("EVM pipeline ready: {}x{}", w, h);
 
     let state = Rc::new(RefCell::new(AppState {
@@ -174,6 +173,14 @@ pub async fn start() -> Result<(), JsValue> {
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
+    let s5 = state.clone();
+    let set_res = Closure::wrap(Box::new(move |max_w: u32| {
+        let mut s = s5.borrow_mut();
+        rebuild_evm(&mut s, max_w);
+    }) as Box<dyn FnMut(u32)>);
+    js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
+    set_res.forget();
+
     js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(0.0))?;
 
     Ok(())
@@ -189,12 +196,12 @@ async fn next_frame() {
 fn rebuild_evm(s: &mut AppState, max_w: u32) {
     let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
     if w == s.width && h == s.height { return; }
-    log::info!("Adaptive resize: {}x{} -> {}x{}", s.width, s.height, w, h);
+    log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
     let canvas = get_canvas();
     canvas.set_width(w);
     canvas.set_height(h);
-    s.evm = EvmPipeline::new(&s.ctx, &s.ctx.instance, canvas, w, h);
+    s.evm = EvmPipeline::new(&s.ctx, w, h);
     s.width = w;
     s.height = h;
 }
@@ -204,8 +211,6 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
     let mut frame_count: u32 = 0;
     let mut last_fps_time = perf_now();
     let mut estimated_fps: f32 = 30.0;
-    let mut current_max_w_idx: usize = 0; // index into DOWNSCALE_STEPS
-    let mut stable_seconds: u32 = 0;
 
     loop {
         next_frame().await;
@@ -216,7 +221,6 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             continue;
         }
 
-        // Grab camera frame
         frame.clear();
         {
             let s = state.borrow();
@@ -225,13 +229,11 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             }
         }
 
-        // Run EVM compute + render directly to canvas
         {
             let s = state.borrow();
             s.evm.process_and_render(&s.ctx, &frame, s.amplification, s.freq_low, s.freq_high, estimated_fps);
         }
 
-        // FPS tracking + adaptive resolution
         frame_count += 1;
         let now = perf_now();
         if now - last_fps_time >= 1000.0 {
@@ -244,25 +246,6 @@ async fn run_loop(state: Rc<RefCell<AppState>>) {
             let (cw, ch) = { let s = state.borrow(); (s.width, s.height) };
             let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
                 &JsValue::from_str(&format!("{}x{}", cw, ch)));
-
-            // Adaptive resolution: downscale if FPS too low, upscale if stable
-            if estimated_fps < TARGET_FPS && current_max_w_idx + 1 < DOWNSCALE_STEPS.len() {
-                current_max_w_idx += 1;
-                stable_seconds = 0;
-                let mut s = state.borrow_mut();
-                rebuild_evm(&mut s, DOWNSCALE_STEPS[current_max_w_idx]);
-            } else if estimated_fps > TARGET_FPS * 1.5 && current_max_w_idx > 0 {
-                stable_seconds += 1;
-                // Only upscale after 5 seconds of stable high FPS
-                if stable_seconds >= 5 {
-                    current_max_w_idx -= 1;
-                    stable_seconds = 0;
-                    let mut s = state.borrow_mut();
-                    rebuild_evm(&mut s, DOWNSCALE_STEPS[current_max_w_idx]);
-                }
-            } else {
-                stable_seconds = 0;
-            }
         }
     }
 }

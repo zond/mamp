@@ -65,8 +65,6 @@ pub struct EvmPipeline {
 
     // Render pipeline (blit to canvas)
     render_pipeline: RenderPipeline,
-    surface: Surface<'static>,
-    surface_config: SurfaceConfiguration,
 
     // Buffers
     buf_frame_rgba: Buffer,
@@ -94,7 +92,7 @@ pub struct EvmPipeline {
 }
 
 impl EvmPipeline {
-    pub fn new(ctx: &GpuContext, instance: &Instance, canvas: web_sys::HtmlCanvasElement, w: u32, h: u32) -> Self {
+    pub fn new(ctx: &GpuContext, w: u32, h: u32) -> Self {
         assert!(w > 0 && h > 0);
 
         let mut level_w = [0u32; N_LEVELS];
@@ -134,11 +132,7 @@ impl EvmPipeline {
                 3 * (level_w[i] as u64) * (level_h[i] as u64) * 4, s)
         });
 
-        // ── Surface for direct canvas rendering ──
-        let surface = instance.create_surface(
-            wgpu::SurfaceTarget::Canvas(canvas),
-        ).expect("Failed to create surface");
-
+        // Configure the shared surface for this resolution
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: TextureFormat::Bgra8Unorm,
@@ -149,7 +143,7 @@ impl EvmPipeline {
             alpha_mode: CompositeAlphaMode::Opaque,
             view_formats: vec![],
         };
-        surface.configure(&ctx.device, &surface_config);
+        ctx.surface.configure(&ctx.device, &surface_config);
 
         // ── Compute pipelines ──
         let rgba_to_chw_pipeline = ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -331,7 +325,7 @@ impl EvmPipeline {
             width: w, height: h, level_w, level_h,
             rgba_to_chw_pipeline, chw_to_rgba_pipeline,
             downsample_pipeline, laplacian_temporal_pipeline, upsample_add_pipeline,
-            render_pipeline, surface, surface_config,
+            render_pipeline,
             buf_frame_rgba, buf_output_rgba,
             gaussian, lp_high, lp_low, amplified, recon,
             frame_param_buf, blit_param_buf,
@@ -369,7 +363,7 @@ impl EvmPipeline {
         }
 
         // Get surface texture for this frame
-        let frame_tex = match self.surface.get_current_texture() {
+        let frame_tex = match ctx.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(t) | CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
                 log::error!("Surface texture unavailable: {:?}", other);

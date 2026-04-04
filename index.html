@@ -88,6 +88,15 @@
         <label for="camera">Camera</label>
         <select id="camera"><option value="">Loading...</option></select>
 
+        <label for="resolution">Res</label>
+        <select id="resolution">
+            <option value="320">320p</option>
+            <option value="480">480p</option>
+            <option value="640" selected>640p</option>
+            <option value="960">960p</option>
+            <option value="1280">1280p</option>
+        </select>
+
         <span class="slider-group">
             <label for="alpha">Amplify</label>
             <input type="range" id="alpha" min="1" max="200" value="30" step="1">
@@ -231,6 +240,13 @@
                 freqCenter.addEventListener('input', updateFreqs);
                 freqBw.addEventListener('input', updateFreqs);
                 updateFreqs();
+
+                // Resolution selector
+                document.getElementById('resolution').addEventListener('change', (e) => {
+                    const maxW = parseInt(e.target.value, 10);
+                    dbg(`Setting resolution: ${maxW}p`);
+                    if (window.setResolution) window.setResolution(maxW);
+                });
 
                 // Pause/resume
                 document.getElementById('toggle').addEventListener('click', function() {

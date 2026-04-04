@@ -1,5 +1,6 @@
 // gpu.rs — WebGPU device init + compute/render pipeline helpers
 
+use wasm_bindgen::JsCast;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
@@ -7,6 +8,7 @@ pub struct GpuContext {
     pub instance: Instance,
     pub device: Device,
     pub queue: Queue,
+    pub surface: Surface<'static>,
     pub rgba_to_chw_module: ShaderModule,
     pub chw_to_rgba_module: ShaderModule,
 }
@@ -64,7 +66,15 @@ impl GpuContext {
             source: ShaderSource::Wgsl(include_str!("shaders/chw_to_rgba.wgsl").into()),
         });
 
-        Self { instance, device, queue, rgba_to_chw_module, chw_to_rgba_module }
+        // Create surface on the output canvas (must happen once, before any configure)
+        let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
+            .document().unwrap()
+            .get_element_by_id("output").unwrap()
+            .dyn_into().unwrap();
+        let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+            .expect("Failed to create surface");
+
+        Self { instance, device, queue, surface, rgba_to_chw_module, chw_to_rgba_module }
     }
 
     pub fn create_buffer_init(&self, label: &str, data: &[f32], usage: BufferUsages) -> Buffer {

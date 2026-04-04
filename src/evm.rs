@@ -135,7 +135,7 @@ impl EvmPipeline {
         // Configure the shared surface for this resolution
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
-            format: TextureFormat::Bgra8Unorm,
+            format: ctx.surface_format,
             width: w,
             height: h,
             present_mode: PresentMode::AutoVsync,
@@ -205,7 +205,7 @@ impl EvmPipeline {
                 module: &blit_module,
                 entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
-                    format: TextureFormat::Bgra8Unorm,
+                    format: ctx.surface_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],

@@ -9,6 +9,7 @@ pub struct GpuContext {
     pub device: Device,
     pub queue: Queue,
     pub surface: Surface<'static>,
+    pub surface_format: TextureFormat,
     pub rgba_to_chw_module: ShaderModule,
     pub chw_to_rgba_module: ShaderModule,
 }
@@ -74,7 +75,11 @@ impl GpuContext {
         let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .expect("Failed to create surface");
 
-        Self { instance, device, queue, surface, rgba_to_chw_module, chw_to_rgba_module }
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps.formats.first().copied().unwrap_or(TextureFormat::Bgra8Unorm);
+        log::info!("Surface format: {:?}, available: {:?}", surface_format, caps.formats);
+
+        Self { instance, device, queue, surface, surface_format, rgba_to_chw_module, chw_to_rgba_module }
     }
 
     pub fn create_buffer_init(&self, label: &str, data: &[f32], usage: BufferUsages) -> Buffer {

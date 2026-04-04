@@ -234,8 +234,11 @@
 
                 function updateFreqs() {
                     const c = parseFloat(freqCenter.value);
-                    const bw = parseFloat(freqBw.value);
-                    const low = Math.max(0.05, c - bw / 2);
+                    // Cap BW at 2× center (prevents negative low freq)
+                    freqBw.max = (2 * c).toFixed(1);
+                    let bw = parseFloat(freqBw.value);
+                    if (bw > 2 * c) { bw = 2 * c; freqBw.value = bw; }
+                    const low = Math.max(0.01, c - bw / 2);
                     const high = c + bw / 2;
                     freqCenterVal.textContent = c.toFixed(2);
                     freqBwVal.textContent = bw.toFixed(1);

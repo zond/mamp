@@ -94,14 +94,14 @@
             <span id="alpha-val">30&times;</span>
         </span>
         <span class="slider-group">
-            <label for="freq-low">Low Hz</label>
-            <input type="range" id="freq-low" min="0.1" max="5" value="0.5" step="0.1">
-            <span id="freq-low-val">0.5</span>
+            <label for="freq-center">Center Hz</label>
+            <input type="range" id="freq-center" min="0.3" max="15" value="1.75" step="0.05">
+            <span id="freq-center-val">1.75</span>
         </span>
         <span class="slider-group">
-            <label for="freq-high">High Hz</label>
-            <input type="range" id="freq-high" min="0.5" max="30" value="3.0" step="0.5">
-            <span id="freq-high-val">3.0</span>
+            <label for="freq-bw">BW Hz</label>
+            <input type="range" id="freq-bw" min="0.2" max="15" value="2.5" step="0.1">
+            <span id="freq-bw-val">2.5</span>
         </span>
 
     </div>
@@ -210,20 +210,25 @@
                     if (window.setMagnification) window.setMagnification(v);
                 });
 
-                // Frequency sliders
-                const freqLow = document.getElementById('freq-low');
-                const freqLowVal = document.getElementById('freq-low-val');
-                freqLow.addEventListener('input', () => {
-                    freqLowVal.textContent = freqLow.value;
-                    if (window.setFreqLow) window.setFreqLow(parseFloat(freqLow.value));
-                });
+                // Frequency sliders (center + bandwidth → low/high)
+                const freqCenter = document.getElementById('freq-center');
+                const freqCenterVal = document.getElementById('freq-center-val');
+                const freqBw = document.getElementById('freq-bw');
+                const freqBwVal = document.getElementById('freq-bw-val');
 
-                const freqHigh = document.getElementById('freq-high');
-                const freqHighVal = document.getElementById('freq-high-val');
-                freqHigh.addEventListener('input', () => {
-                    freqHighVal.textContent = freqHigh.value;
-                    if (window.setFreqHigh) window.setFreqHigh(parseFloat(freqHigh.value));
-                });
+                function updateFreqs() {
+                    const c = parseFloat(freqCenter.value);
+                    const bw = parseFloat(freqBw.value);
+                    const low = Math.max(0.05, c - bw / 2);
+                    const high = c + bw / 2;
+                    freqCenterVal.textContent = c.toFixed(2);
+                    freqBwVal.textContent = bw.toFixed(1);
+                    if (window.setFreqLow) window.setFreqLow(low);
+                    if (window.setFreqHigh) window.setFreqHigh(high);
+                }
+                freqCenter.addEventListener('input', updateFreqs);
+                freqBw.addEventListener('input', updateFreqs);
+                updateFreqs();
 
                 // Pause/resume
                 document.getElementById('toggle').addEventListener('click', function() {

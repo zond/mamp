@@ -112,12 +112,12 @@ struct AppState {
     frame_index: u64,
     fps_frame_count: u32,
     fps_last_update: f64,
-    magnified_pixels: Vec<u32>,
-    /// Per-staging-buffer mapping state: true = mapped or map pending.
-    staging_mapped: [Rc<Cell<bool>>; 2],
-    has_magnified: bool,
-    /// Which staging buffer to write to next (alternates 0/1).
-    staging_idx: usize,
+    /// Last successfully read-back magnified frame.
+    magnified_pixels: Rc<RefCell<Vec<u32>>>,
+    /// True once at least one readback completed.
+    has_magnified: Rc<Cell<bool>>,
+    /// Tracks whether a readback is currently in-flight.
+    readback_in_flight: Rc<Cell<bool>>,
 }
 
 async fn load_weights() -> ModelWeights {
@@ -324,10 +324,9 @@ pub async fn start() -> Result<(), JsValue> {
         frame_index: 0,
         fps_frame_count: 0,
         fps_last_update: now,
-        magnified_pixels: vec![0u32; (w * h) as usize],
-        staging_mapped: [Rc::new(Cell::new(false)), Rc::new(Cell::new(false))],
-        has_magnified: false,
-        staging_idx: 0,
+        magnified_pixels: Rc::new(RefCell::new(vec![0u32; (w * h) as usize])),
+        has_magnified: Rc::new(Cell::new(false)),
+        readback_in_flight: Rc::new(Cell::new(false)),
     }));
 
     let state_ptr = Box::into_raw(Box::new(state.clone())) as usize;
@@ -454,54 +453,69 @@ fn process_frame(state: &Rc<RefCell<AppState>>) -> bool {
     dest.clear();
     dest.extend_from_slice(&frame);
 
-    let write_idx = s.staging_idx;
-    let read_idx = write_idx ^ 1;
-
-    // Try to read back from the OTHER staging buffer (written last frame)
-    if s.staging_mapped[read_idx].get() {
-        {
-            let view = s.model.buf_staging[read_idx].slice(..).get_mapped_range();
-            let pixels: &[u32] = bytemuck::cast_slice(&view);
-            s.magnified_pixels.clear();
-            s.magnified_pixels.extend_from_slice(pixels);
-            s.has_magnified = true;
-        }
-        s.model.buf_staging[read_idx].unmap();
-        s.staging_mapped[read_idx].set(false);
-    }
-
-    // Ensure the write-target staging buffer is not mapped before magnify
-    if s.staging_mapped[write_idx].get() {
-        // Discard this data (we already read from the other buffer)
-        s.model.buf_staging[write_idx].unmap();
-        s.staging_mapped[write_idx].set(false);
-    }
-
-    // Run magnification
+    // Run magnification on the GPU
     if let Some(prev) = s.frames.prev_frame() {
         let (run_count, period) = skip_policy(s.avg_frame_time_ms);
         let should_magnify = (s.frame_index % period) < run_count;
 
-        if should_magnify {
+        if should_magnify && !s.readback_in_flight.get() {
             let current = s.frames.current_frame();
-            s.model.magnify(&s.ctx, prev, current, s.alpha, write_idx);
+            // Run neural net, copy result to staging[0]
+            s.model.magnify(&s.ctx, prev, current, s.alpha, 0);
 
-            // Request async map on the buffer we just wrote to
-            let flag = s.staging_mapped[write_idx].clone();
-            s.model.buf_staging[write_idx].slice(..).map_async(wgpu::MapMode::Read, move |result| {
-                if result.is_ok() {
-                    flag.set(true);
+            // Kick off fully-async readback via spawn_local
+            let staging = &s.model.buf_staging[0];
+            let slice = staging.slice(..);
+            let mag_pixels = s.magnified_pixels.clone();
+            let has_mag = s.has_magnified.clone();
+            let in_flight = s.readback_in_flight.clone();
+            in_flight.set(true);
+
+            slice.map_async(wgpu::MapMode::Read, {
+                let mag_pixels = mag_pixels.clone();
+                let has_mag = has_mag.clone();
+                let in_flight = in_flight.clone();
+                move |result| {
+                    if result.is_ok() {
+                        // Callback fires when GPU work is done and buffer is mapped.
+                        // We CAN'T read here because we don't have a reference to the
+                        // buffer. We just signal that mapping is ready.
+                        // Reading happens in a spawn_local below.
+                    }
+                    let _ = (mag_pixels, has_mag, in_flight); // prevent drops
                 }
             });
 
-            // Swap for next frame
-            s.staging_idx ^= 1;
+            // spawn_local: wait for the buffer to be readable, then read + unmap
+            wasm_bindgen_futures::spawn_local({
+                let state_clone = state.clone();
+                async move {
+                    // Yield once to let the map_async callback fire
+                    yield_once().await;
+                    yield_once().await;
+
+                    if let Ok(s) = state_clone.try_borrow() {
+                        let staging = &s.model.buf_staging[0];
+                        {
+                            let view = staging.slice(..).get_mapped_range();
+                            let pixels: &[u32] = bytemuck::cast_slice(&view);
+                            let mut buf = s.magnified_pixels.borrow_mut();
+                            buf.clear();
+                            buf.extend_from_slice(pixels);
+                        }
+                        staging.unmap();
+                        s.has_magnified.set(true);
+                        s.readback_in_flight.set(false);
+                    }
+                }
+            });
         }
     }
 
     // Display magnified frame if available, otherwise raw camera
-    if s.has_magnified {
-        let _ = s.renderer.draw(&s.magnified_pixels);
+    if s.has_magnified.get() {
+        let mag = s.magnified_pixels.borrow();
+        let _ = s.renderer.draw(&mag);
     } else {
         let _ = s.renderer.draw(s.frames.current_frame());
     }

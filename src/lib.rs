@@ -13,7 +13,7 @@ use evm::EvmPipeline;
 use gpu::GpuContext;
 use video::VideoCapture;
 
-const MAX_WIDTH: u32 = 4096; // effectively unlimited — use camera native resolution
+const MAX_WIDTH: u32 = 1280; // balance quality vs GPU load
 
 struct AppState {
     ctx: GpuContext,
@@ -74,8 +74,12 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
         let mut s = state.borrow_mut();
         s.running = false;
     }
-    yield_to_browser().await;
-    yield_to_browser().await;
+    // Wait until run_loop actually yields (it checks running each frame).
+    // Need enough yields for the current frame to finish processing.
+    for _ in 0..10 {
+        yield_to_browser().await;
+        if state.try_borrow().is_ok() { break; }
+    }
 
     state.borrow().capture.start_with_device(device_id).await?;
 

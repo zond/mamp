@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Motion Magnification — WebGPU</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .subtitle {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 1.5rem;
+        }
+        #output {
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #111;
+        }
+        .controls {
+            margin-top: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        label {
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+        input[type="range"] {
+            width: 200px;
+            accent-color: #6c5ce7;
+        }
+        #alpha-val {
+            font-variant-numeric: tabular-nums;
+            min-width: 3ch;
+            text-align: right;
+            color: #6c5ce7;
+            font-weight: 700;
+        }
+        button {
+            padding: 0.5rem 1.2rem;
+            border: 1px solid #444;
+            border-radius: 6px;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        button:hover { background: #2a2a4e; }
+        #status {
+            margin-top: 1rem;
+            font-size: 0.8rem;
+            color: #666;
+        }
+        .error { color: #e74c3c !important; }
+    </style>
+</head>
+<body>
+    <h1>Video Motion Magnification</h1>
+    <p class="subtitle">Ha et al. 2024 — WebGPU accelerated</p>
+
+    <canvas id="output" width="480" height="360"></canvas>
+
+    <div class="controls">
+        <label for="alpha">α</label>
+        <input type="range" id="alpha" min="1" max="100" value="20" step="1">
+        <span id="alpha-val">20×</span>
+        <button id="toggle">Pause</button>
+    </div>
+    <p id="status">Initializing WebGPU...</p>
+
+    <script type="module">
+        async function init() {
+            const status = document.getElementById('status');
+
+            // Check WebGPU support
+            if (!navigator.gpu) {
+                status.textContent = 'WebGPU not supported in this browser. Try Chrome 113+ or Edge 113+.';
+                status.classList.add('error');
+                return;
+            }
+
+            try {
+                // Load WASM module (built by wasm-pack)
+                const wasm = await import('./pkg/motion_mag_webgpu.js');
+                await wasm.default();
+
+                status.textContent = 'Running — motion magnification active';
+
+                // Wire up controls
+                const slider = document.getElementById('alpha');
+                const alphaVal = document.getElementById('alpha-val');
+                slider.addEventListener('input', () => {
+                    const v = parseFloat(slider.value);
+                    alphaVal.textContent = v + '×';
+                    if (window.setMagnification) window.setMagnification(v);
+                });
+
+                const toggle = document.getElementById('toggle');
+                toggle.addEventListener('click', () => {
+                    if (window.toggleMagnification) window.toggleMagnification();
+                    toggle.textContent = toggle.textContent === 'Pause' ? 'Resume' : 'Pause';
+                });
+
+            } catch (e) {
+                status.textContent = `Error: ${e.message || e}`;
+                status.classList.add('error');
+                console.error(e);
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

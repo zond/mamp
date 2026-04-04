@@ -105,15 +105,17 @@ impl ConvLayer {
 
         let pipeline_layout = ctx.device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some(&format!("{}_layout", label)),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
 
         let pipeline = ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
             module: &ctx.conv2d_module,
-            entry_point: "main",
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
         });
 
         Self {
@@ -457,9 +459,11 @@ impl MotionMagModel {
 fn build_manipulator_pipeline(ctx: &GpuContext) -> ComputePipeline {
     ctx.device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("manipulator"),
-        layout: None,  // auto layout
+        layout: None,
         module: &ctx.manipulator_module,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
     })
 }
 
@@ -468,7 +472,9 @@ fn build_upsample_pipeline(ctx: &GpuContext) -> ComputePipeline {
         label: Some("upsample"),
         layout: None,
         module: &ctx.upsample_module,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
     })
 }
 
@@ -477,7 +483,9 @@ fn build_frame_pipeline(ctx: &GpuContext, module: &ShaderModule) -> ComputePipel
         label: Some("frame_io"),
         layout: None,
         module,
-        entry_point: "main",
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
     })
 }
 

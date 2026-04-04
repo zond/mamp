@@ -16,10 +16,9 @@ pub struct GpuContext {
 
 impl GpuContext {
     pub async fn new() -> Self {
-        let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::BROWSER_WEBGPU,
-            ..Default::default()
-        });
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = Backends::BROWSER_WEBGPU;
+        let instance = Instance::new(desc);
 
         log::info!("Requesting WebGPU adapter...");
         let adapter = instance
@@ -34,14 +33,14 @@ impl GpuContext {
         log::info!("Adapter: {:?}", adapter.get_info());
 
         let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: Some("motion-mag-device"),
-                    required_features: Features::empty(),
-                    required_limits: Limits::default(),
-                },
-                None,
-            )
+            .request_device(&DeviceDescriptor {
+                label: Some("motion-mag-device"),
+                required_features: Features::empty(),
+                required_limits: Limits::default(),
+                memory_hints: MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            })
             .await
             .expect("Failed to create WebGPU device");
 
@@ -128,7 +127,7 @@ impl GpuContext {
                 timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(0, Some(bind_group), &[]);
             pass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
         }
         self.queue.submit(std::iter::once(encoder.finish()));

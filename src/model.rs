@@ -571,7 +571,7 @@ impl MotionMagModel {
         });
         GpuContext::record_dispatch(
             &mut pass, pipeline, bind_group,
-            (GpuContext::div_ceil(w, 8), GpuContext::div_ceil(h, 8), 1),
+            (GpuContext::div_ceil(w, 64), GpuContext::div_ceil(h, 16), 1),
         );
     }
 
@@ -583,7 +583,7 @@ impl MotionMagModel {
         });
         GpuContext::record_dispatch(
             &mut pass, &self.manip_pipeline, &self.manip_bg,
-            (GpuContext::div_ceil(w, 8), GpuContext::div_ceil(h, 8), 32),
+            (GpuContext::div_ceil(w, 8), GpuContext::div_ceil(h, 8), 8),
         );
     }
 
@@ -595,7 +595,7 @@ impl MotionMagModel {
         });
         GpuContext::record_dispatch(
             &mut pass, &self.upsample_pipeline, &self.upsample_bg,
-            (GpuContext::div_ceil(out_w, 8), GpuContext::div_ceil(out_h, 8), 32),
+            (GpuContext::div_ceil(out_w, 8), GpuContext::div_ceil(out_h, 8), 8),
         );
     }
 }

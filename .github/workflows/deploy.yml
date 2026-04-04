@@ -39,7 +39,7 @@ jobs:
         run: wasm-pack build --target web --release --out-dir pkg
 
       - name: Optimize WASM with recent wasm-opt
-        run: wasm-opt pkg/motion_mag_webgpu_bg.wasm -O -o pkg/motion_mag_webgpu_bg.wasm --enable-bulk-memory
+        run: wasm-opt pkg/motion_mag_webgpu_bg.wasm -O -o pkg/motion_mag_webgpu_bg.wasm --all-features
 
       - name: Copy index.html to pkg
         run: cp index.html pkg/

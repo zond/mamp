@@ -275,11 +275,15 @@
                 freqBw.addEventListener('input', updateFreqs);
                 updateFreqs();
 
-                // Resolution selector
-                document.getElementById('resolution').addEventListener('change', (e) => {
+                // Resolution selector (async — restarts camera at matching resolution)
+                document.getElementById('resolution').addEventListener('change', async (e) => {
                     const maxW = parseInt(e.target.value, 10);
                     dbg(`Setting resolution: ${maxW}p`);
-                    if (window.setResolution) window.setResolution(maxW);
+                    try {
+                        await wasm.set_resolution(maxW);
+                    } catch (err) {
+                        dbg(`Resolution change failed: ${err}`);
+                    }
                 });
 
                 // Quality selector (scales × orientations)

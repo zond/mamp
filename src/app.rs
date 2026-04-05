@@ -119,6 +119,59 @@ pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(),
     Ok(())
 }
 
+#[allow(clippy::await_holding_refcell_ref)]
+#[wasm_bindgen]
+pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
+    let shared = SHARED.with(|s| s.borrow().clone())
+        .ok_or_else(|| JsValue::from_str("Not initialized yet"))?;
+
+    shared.running.set(false);
+
+    loop {
+        yield_to_browser().await;
+        if shared.state.try_borrow_mut().is_ok() { break; }
+    }
+
+    {
+        let mut s = shared.state.borrow_mut();
+        let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
+        if w == s.width && h == s.height {
+            log::info!("Resolution unchanged: {}x{}", w, h);
+            shared.running.set(true);
+            return Ok(());
+        }
+        // Resize capture canvas to new processing size
+        s.capture.resize(w, h);
+    }
+
+    {
+        // Restart camera at matching resolution
+        let s = shared.state.borrow();
+        s.capture.start_with_device("", "").await?;
+    }
+
+    {
+        let mut s = shared.state.borrow_mut();
+        let (cam_w, cam_h) = s.capture.actual_size();
+        s.cam_w = cam_w;
+        s.cam_h = cam_h;
+        let (w, h) = processing_size(cam_w, cam_h, max_w);
+        log::info!("Resolution: {}x{} (camera {}x{})", w, h, cam_w, cam_h);
+        s.capture.resize(w, h);
+        s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device), s.n_scales, s.n_orient);
+        s.width = w;
+        s.height = h;
+        let window = web_sys::window().unwrap();
+        let ratio = w as f64 / h as f64;
+        let _ = js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio));
+        let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
+            &JsValue::from_str(&format!("{}x{}", w, h)));
+        shared.running.set(true);
+    }
+
+    Ok(())
+}
+
 #[wasm_bindgen(start)]
 pub async fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -187,12 +240,8 @@ pub async fn start() -> Result<(), JsValue> {
     js_sys::Reflect::set(&window, &"toggleMagnification".into(), toggle.as_ref())?;
     toggle.forget();
 
-    let c5 = shared.clone();
-    let set_res = Closure::wrap(Box::new(move |max_w: u32| {
-        if let Ok(mut s) = c5.state.try_borrow_mut() { rebuild_pipeline(&mut s, max_w); }
-    }) as Box<dyn FnMut(u32)>);
-    js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
-    set_res.forget();
+    // setResolution is now a wasm_bindgen async function (set_resolution),
+    // called directly from JS — no closure needed.
 
     let c6 = shared.clone();
     let set_quality = Closure::wrap(Box::new(move |scales: u32, orient: u32| {
@@ -218,24 +267,6 @@ async fn next_frame() {
         web_sys::window().unwrap().request_animation_frame(&resolve).unwrap();
     });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
-}
-
-fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
-    let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
-    if w == s.width && h == s.height {
-        log::info!("Resolution unchanged: {}x{} (camera {}x{}, max {})",
-            w, h, s.cam_w, s.cam_h, max_w);
-        return;
-    }
-    log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
-    s.capture.resize(w, h);
-    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device), s.n_scales, s.n_orient);
-    s.width = w;
-    s.height = h;
-    // Push resolution to JS immediately so status text updates
-    let window = web_sys::window().unwrap();
-    let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
-        &JsValue::from_str(&format!("{}x{}", w, h)));
 }
 
 async fn run_loop(shared: Rc<Shared>) {

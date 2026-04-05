@@ -109,13 +109,14 @@ impl VideoCapture {
             let exact = js_sys::Object::new();
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
-            if target_width > 0 {
+            {
+                let w_hint = if target_width > 0 { target_width } else { 4096 };
                 let ideal_w = js_sys::Object::new();
-                js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(target_width))?;
+                js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(w_hint))?;
                 js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
             }
             attempts.push((
-                format!("deviceId={} w={}", device_id, if target_width > 0 { target_width.to_string() } else { "best".into() }),
+                format!("deviceId={} w={}", device_id, if target_width > 0 { target_width } else { 4096 }),
                 vc.into(),
             ));
         }

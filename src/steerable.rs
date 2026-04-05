@@ -15,9 +15,6 @@ use wasm_bindgen::JsCast;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
-const MAX_SCALES: u32 = 4;
-const MAX_ORIENT: u32 = 8;
-
 fn next_pow2(n: u32) -> u32 {
     if n.is_power_of_two() { n } else { n.next_power_of_two() }
 }
@@ -76,8 +73,7 @@ pub struct SteerablePipeline {
     bg_fft_mod_row: BindGroup,
     bg_fft_mod_col: BindGroup,
     bg_accum: Vec<BindGroup>,
-    bg_res_hi: BindGroup,
-    bg_res_lo: BindGroup,
+    bg_res: BindGroup,
     bg_ifft_final_col: BindGroup,
     bg_ifft_final_row: BindGroup,
     bg_y2r: BindGroup,
@@ -88,8 +84,8 @@ pub struct SteerablePipeline {
 
 impl SteerablePipeline {
     pub fn new(ctx: &GpuContext, w: u32, h: u32, max_fft: u32, n_scales: u32, n_orient: u32) -> Self {
-        assert!(n_scales >= 1 && n_scales <= MAX_SCALES);
-        assert!(n_orient >= 1 && n_orient <= MAX_ORIENT);
+        assert!(n_scales >= 1 && n_scales <= 4);
+        assert!(n_orient >= 1 && n_orient <= 8);
         let n_band = (n_scales * n_orient) as usize;
         let pw = next_pow2(w).min(max_fft);
         let ph = next_pow2(h).min(max_fft);
@@ -129,6 +125,7 @@ impl SteerablePipeline {
         let filt_band: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("fb{}", i), ppix*4)).collect();
         let filt_hi = mk("fhi", ppix * 4);
         let filt_lo = mk("flo", ppix * 4);
+        let filt_res = mk("frs", ppix * 4); // filt_hi + filt_lo (summed at init)
 
         // ── Compute pipelines ──
         let mkc = |label: &str, src: &str| {
@@ -149,6 +146,7 @@ impl SteerablePipeline {
         let pl_apply = mkc("apply", include_str!("shaders/apply_filter.wgsl"));
         let pl_accum = mkc("accum", include_str!("shaders/apply_filter_accum.wgsl"));
         let pl_phase = mkc("phase", include_str!("shaders/phase_amplify.wgsl"));
+        let pl_add = mkc("add", include_str!("shaders/add_buffers.wgsl"));
 
         // ── Surface + blit ──
         let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
@@ -233,6 +231,15 @@ impl SteerablePipeline {
         {
             let mut enc = dev.create_command_encoder(&CommandEncoderDescriptor { label: Some("precomp") });
             {
+                let bg_add = {
+                    let entries: Vec<BindGroupEntry> = [&u_pdims as &Buffer, &filt_hi, &filt_lo, &filt_res]
+                        .iter().enumerate()
+                        .map(|(i, b)| BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() })
+                        .collect();
+                    dev.create_bind_group(&BindGroupDescriptor {
+                        label: None, layout: &pl_add.get_bind_group_layout(0), entries: &entries,
+                    })
+                };
                 let mut p = enc.begin_compute_pass(&ComputePassDescriptor { label: None, timestamp_writes: None });
                 for bg in &precomp_bgs {
                     p.set_pipeline(&pl_precomp);
@@ -244,6 +251,10 @@ impl SteerablePipeline {
                 p.dispatch_workgroups(wg.0, wg.1, wg.2);
                 p.set_pipeline(&pl_precomp);
                 p.set_bind_group(0, Some(&bg_precomp_lo), &[]);
+                p.dispatch_workgroups(wg.0, wg.1, wg.2);
+                // Sum filt_hi + filt_lo → filt_res
+                p.set_pipeline(&pl_add);
+                p.set_bind_group(0, Some(&bg_add), &[]);
                 p.dispatch_workgroups(wg.0, wg.1, wg.2);
             }
             ctx.queue.submit(std::iter::once(enc.finish()));
@@ -284,9 +295,8 @@ impl SteerablePipeline {
             mk_bg(&pl_accum, &[&u_pdims, &filt_band[i], &b_ms_re, &b_ms_im, &b_acc_re, &b_acc_im])
         }).collect();
 
-        // Residuals (pre-computed with h² already baked in)
-        let bg_res_hi = mk_bg(&pl_accum, &[&u_pdims, &filt_hi, &b_spec_re, &b_spec_im, &b_acc_re, &b_acc_im]);
-        let bg_res_lo = mk_bg(&pl_accum, &[&u_pdims, &filt_lo, &b_spec_re, &b_spec_im, &b_acc_re, &b_acc_im]);
+        // Residual (pre-summed filt_hi² + filt_lo² into single buffer)
+        let bg_res = mk_bg(&pl_accum, &[&u_pdims, &filt_res, &b_spec_re, &b_spec_im, &b_acc_re, &b_acc_im]);
 
         // Final reconstruction
         let bg_ifft_final_col = mk_bg(&pl_fft, &[&u_fft_ci, &b_acc_re, &b_acc_im, &b_tmp_re, &b_tmp_im]);
@@ -309,7 +319,7 @@ impl SteerablePipeline {
             bg_r2y, bg_fft_y_row, bg_fft_y_col,
             bg_apply, bg_ifft_sb_col, bg_ifft_sb_row,
             bg_phase, bg_fft_mod_row, bg_fft_mod_col,
-            bg_accum, bg_res_hi, bg_res_lo,
+            bg_accum, bg_res,
             bg_ifft_final_col, bg_ifft_final_row, bg_y2r, bg_blit,
             first_frame: true,
         }
@@ -321,7 +331,7 @@ impl SteerablePipeline {
     }
 
     pub fn process_and_render(
-        &mut self, ctx: &GpuContext, frame: &[u32],
+        &mut self, ctx: &GpuContext, frame: &[u8],
         amp: f32, freq_lo: f32, freq_hi: f32, fps: f32,
     ) {
         let (pw, ph, w, h) = (self.pw, self.ph, self.ow, self.oh);
@@ -329,7 +339,7 @@ impl SteerablePipeline {
         let al = 1.0 - (-two_pi * freq_lo / fps).exp();
         let ah = 1.0 - (-two_pi * freq_hi / fps).exp();
 
-        ctx.queue.write_buffer(&self.b_rgba_in, 0, bytemuck::cast_slice(frame));
+        ctx.queue.write_buffer(&self.b_rgba_in, 0, frame);
         ctx.queue.write_buffer(&self.u_phase, 0, bytemuck::bytes_of(&PhaseParams {
             w: pw, h: ph, amp, al, ah, first: if self.first_frame { 1 } else { 0 }, _p0: 0, _p1: 0,
         }));
@@ -375,9 +385,8 @@ impl SteerablePipeline {
                 Self::rec(&mut p, &self.pl_accum, &self.bg_accum[idx], wg);
             }
 
-            // Residuals (h² already baked into pre-computed buffers)
-            Self::rec(&mut p, &self.pl_accum, &self.bg_res_hi, wg);
-            Self::rec(&mut p, &self.pl_accum, &self.bg_res_lo, wg);
+            // Residual (pre-summed hi² + lo² in single buffer)
+            Self::rec(&mut p, &self.pl_accum, &self.bg_res, wg);
 
             // Inverse 2D FFT: accumulated spectrum → modified Y
             Self::rec(&mut p, &self.pl_fft, &self.bg_ifft_final_col, (pw, 1, 1));

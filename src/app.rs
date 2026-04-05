@@ -96,6 +96,8 @@ pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(),
     {
         let mut s = shared.state.borrow_mut();
         let (cam_w, cam_h) = s.capture.actual_size();
+        s.cam_w = cam_w;
+        s.cam_h = cam_h;
         let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
 
@@ -230,7 +232,7 @@ fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
 }
 
 async fn run_loop(shared: Rc<Shared>) {
-    let mut frame: Vec<u32> = Vec::new();
+    let mut frame: Vec<u8> = Vec::new();
     let mut frame_count: u32 = 0;
     let mut last_fps_time = perf_now();
     let mut estimated_fps: f32 = 30.0;

@@ -218,8 +218,8 @@ impl VideoCapture {
         self._canvas.set_height(height);
     }
 
-    /// Grab the current video frame into a caller-provided buffer.
-    pub fn grab_frame_into(&self, dest: &mut Vec<u32>) -> Result<(), JsValue> {
+    /// Grab the current video frame as raw RGBA bytes.
+    pub fn grab_frame_into(&self, dest: &mut Vec<u8>) -> Result<(), JsValue> {
         if self.mirrored.get() {
             self.ctx2d.save();
             self.ctx2d.translate(self.width as f64, 0.0)?;
@@ -238,12 +238,10 @@ impl VideoCapture {
         let image_data =
             self.ctx2d
                 .get_image_data(0.0, 0.0, self.width as f64, self.height as f64)?;
-        let raw: Vec<u8> = image_data.data().0;
 
-        dest.clear();
-        dest.extend(raw.chunks_exact(4).map(|c| {
-            (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
-        }));
+        // On little-endian WASM, RGBA bytes are already in u32 layout.
+        // Return raw bytes — caller passes directly to write_buffer.
+        *dest = image_data.data().0;
 
         Ok(())
     }

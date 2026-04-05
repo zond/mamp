@@ -300,13 +300,13 @@
                         if (String(value) === cur) opt.selected = true;
                         sel.appendChild(opt);
                     });
-                    // Default: select the largest option <= 640, or the last option
-                    if (!sel.value || !options.some(o => String(o.value) === sel.value)) {
-                        const best = options.filter(o => o.value <= 640).pop() || options[options.length - 1];
+                    // Select the largest option <= current processing width (or camera width as proxy)
+                    if (!options.some(o => String(o.value) === cur)) {
+                        const procW = window.__mamp_cam_w || 640;
+                        const best = options.filter(o => o.value <= procW).pop() || options[options.length - 1];
                         if (best) sel.value = best.value;
                     }
                 }
-                updateResOptions();
 
                 // Resolution selector (async — restarts camera at matching resolution)
                 document.getElementById('resolution').addEventListener('change', async (e) => {

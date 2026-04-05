@@ -1,7 +1,6 @@
 // gpu.rs — WebGPU device init + compute/render pipeline helpers
 
 use wasm_bindgen::JsCast;
-use wgpu::util::DeviceExt;
 use wgpu::*;
 
 pub struct GpuContext {
@@ -94,26 +93,4 @@ impl GpuContext {
         })
     }
 
-    pub fn create_uniform<T: bytemuck::Pod>(&self, label: &str, data: &T) -> Buffer {
-        self.device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(data),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        })
-    }
-
-    pub fn record_dispatch<'a>(
-        pass: &mut ComputePass<'a>,
-        pipeline: &'a ComputePipeline,
-        bind_group: &'a BindGroup,
-        workgroups: (u32, u32, u32),
-    ) {
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, Some(bind_group), &[]);
-        pass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
-    }
-
-    pub fn div_ceil(a: u32, b: u32) -> u32 {
-        a.div_ceil(b)
-    }
 }

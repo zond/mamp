@@ -139,8 +139,8 @@ pub async fn start() -> Result<(), JsValue> {
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let n_scales = 2u32;
-    let n_orient = 2u32;
+    let n_scales = 3u32;
+    let n_orient = 4u32;
     let pipeline = SteerablePipeline::new(&ctx, w, h, max_fft_for_device(&ctx.device), n_scales, n_orient);
     log::info!("Steerable pipeline ready: {}x{}", w, h);
 

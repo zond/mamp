@@ -1,5 +1,6 @@
 // video.rs — Browser camera capture and canvas rendering via web-sys
 
+use std::cell::Cell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -13,6 +14,7 @@ pub struct VideoCapture {
     ctx2d: CanvasRenderingContext2d,
     pub width: u32,
     pub height: u32,
+    mirrored: Cell<bool>,
 }
 
 impl VideoCapture {
@@ -50,6 +52,7 @@ impl VideoCapture {
             ctx2d,
             width,
             height,
+            mirrored: Cell::new(true), // assume front-facing until proven otherwise
         })
     }
 
@@ -93,8 +96,20 @@ impl VideoCapture {
         let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
         let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
 
-        self.video
-            .set_src_object(Some(&stream.unchecked_into::<web_sys::MediaStream>()));
+        let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
+        self.video.set_src_object(Some(&stream_obj));
+
+        // Detect facing mode to decide mirroring
+        let tracks = stream_obj.get_video_tracks();
+        if tracks.length() > 0 {
+            let track: web_sys::MediaStreamTrack = tracks.get(0).unchecked_into();
+            let settings = track.get_settings();
+            let facing = js_sys::Reflect::get(settings.as_ref(), &"facingMode".into())
+                .ok()
+                .and_then(|v| v.as_string());
+            // Mirror unless explicitly "environment" (back camera)
+            self.mirrored.set(facing.as_deref() != Some("environment"));
+        }
 
         let play_promise = self.video.play()?;
         wasm_bindgen_futures::JsFuture::from(play_promise).await?;
@@ -133,6 +148,12 @@ impl VideoCapture {
     /// Grab the current video frame into a caller-provided buffer, reusing its
     /// allocation.  The buffer is cleared and refilled each call.
     pub fn grab_frame_into(&self, dest: &mut Vec<u32>) -> Result<(), JsValue> {
+        if self.mirrored.get() {
+            self.ctx2d.save();
+            self.ctx2d.translate(self.width as f64, 0.0)?;
+            self.ctx2d.scale(-1.0, 1.0)?;
+        }
+
         self.ctx2d
             .draw_image_with_html_video_element_and_dw_and_dh(
                 &self.video,
@@ -141,6 +162,10 @@ impl VideoCapture {
                 self.width as f64,
                 self.height as f64,
             )?;
+
+        if self.mirrored.get() {
+            self.ctx2d.restore();
+        }
 
         let image_data =
             self.ctx2d

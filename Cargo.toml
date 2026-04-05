@@ -33,6 +33,7 @@ features = [
     "MediaStream",
     "MediaStreamConstraints",
     "MediaStreamTrack",
+    "MediaTrackSettings",
     "Navigator",
     "Window",
     "CanvasRenderingContext2d",

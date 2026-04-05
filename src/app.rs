@@ -44,6 +44,8 @@ struct AppState {
     height: u32,
     cam_w: u32,
     cam_h: u32,
+    active_device_id: String,
+    active_facing: String,
 }
 
 fn processing_size(cam_w: u32, cam_h: u32, max_width: u32) -> (u32, u32) {
@@ -95,6 +97,8 @@ pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(),
 
     {
         let mut s = shared.state.borrow_mut();
+        s.active_device_id = device_id.to_string();
+        s.active_facing = facing_mode.to_string();
         let (cam_w, cam_h) = s.capture.actual_size();
         s.cam_w = cam_w;
         s.cam_h = cam_h;
@@ -132,7 +136,8 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
         if shared.state.try_borrow_mut().is_ok() { break; }
     }
 
-    {
+    // Read active camera info and resize before restarting
+    let (device_id, facing) = {
         let mut s = shared.state.borrow_mut();
         let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
         if w == s.width && h == s.height {
@@ -140,14 +145,14 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
             shared.running.set(true);
             return Ok(());
         }
-        // Resize capture canvas to new processing size
         s.capture.resize(w, h);
-    }
+        (s.active_device_id.clone(), s.active_facing.clone())
+    };
 
     {
-        // Restart camera at matching resolution
+        // Restart same camera at resolution matching new processing size
         let s = shared.state.borrow();
-        s.capture.start_with_device("", "").await?;
+        s.capture.start_with_device(&device_id, &facing).await?;
     }
 
     {
@@ -204,6 +209,7 @@ pub async fn start() -> Result<(), JsValue> {
             ctx, pipeline, capture,
             amplification: 30.0, freq_low: 0.5, freq_high: 3.0, n_scales, n_orient,
             width: w, height: h, cam_w, cam_h,
+            active_device_id: String::new(), active_facing: String::new(),
         }),
         running: Cell::new(true),
     });
@@ -304,9 +310,12 @@ async fn run_loop(shared: Rc<Shared>) {
             last_fps_time = now;
             let window = web_sys::window().unwrap();
             let _ = js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(fps));
-            let (cw, ch) = { let s = shared.state.borrow(); (s.width, s.height) };
+            let (pw, ph, cw, ch) = {
+                let s = shared.state.borrow();
+                (s.width, s.height, s.cam_w, s.cam_h)
+            };
             let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
-                &JsValue::from_str(&format!("{}x{}", cw, ch)));
+                &JsValue::from_str(&format!("{}x{} cam {}x{}", pw, ph, cw, ch)));
         }
     }
 }

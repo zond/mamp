@@ -69,6 +69,14 @@ impl VideoCapture {
             }
             self.video.set_src_object(None);
             self.video.load(); // force full teardown of old source
+
+            // Wait for the hardware to fully release the camera
+            let delay = js_sys::Promise::new(&mut |resolve, _| {
+                web_sys::window().unwrap()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 500)
+                    .unwrap();
+            });
+            wasm_bindgen_futures::JsFuture::from(delay).await?;
         }
 
         let window = web_sys::window().unwrap();

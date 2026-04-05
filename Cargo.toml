@@ -42,6 +42,13 @@ features = [
     "Response",
 ]
 
+[features]
+# Enable native GPU backend for cargo test (not used in WASM build)
+native-test = ["wgpu/vulkan"]
+
+[dev-dependencies]
+pollster = "0.4"
+
 [profile.release]
 opt-level = "z"
 lto = true

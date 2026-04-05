@@ -34,6 +34,8 @@ struct AppState {
     amplification: f32,
     freq_low: f32,
     freq_high: f32,
+    n_scales: u32,
+    n_orient: u32,
     width: u32,
     height: u32,
     cam_w: u32,
@@ -99,7 +101,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device));
+            s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device), s.n_scales, s.n_orient);
             s.width = w;
             s.height = h;
 
@@ -137,13 +139,15 @@ pub async fn start() -> Result<(), JsValue> {
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let pipeline = SteerablePipeline::new(&ctx, w, h, max_fft_for_device(&ctx.device));
+    let n_scales = 2u32;
+    let n_orient = 2u32;
+    let pipeline = SteerablePipeline::new(&ctx, w, h, max_fft_for_device(&ctx.device), n_scales, n_orient);
     log::info!("Steerable pipeline ready: {}x{}", w, h);
 
     let shared = Rc::new(Shared {
         state: RefCell::new(AppState {
             ctx, pipeline, capture,
-            amplification: 30.0, freq_low: 0.5, freq_high: 3.0,
+            amplification: 30.0, freq_low: 0.5, freq_high: 3.0, n_scales, n_orient,
             width: w, height: h, cam_w, cam_h,
         }),
         running: Cell::new(true),
@@ -189,6 +193,20 @@ pub async fn start() -> Result<(), JsValue> {
     js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
     set_res.forget();
 
+    let c6 = shared.clone();
+    let set_quality = Closure::wrap(Box::new(move |scales: u32, orient: u32| {
+        if let Ok(mut s) = c6.state.try_borrow_mut() {
+            if scales != s.n_scales || orient != s.n_orient {
+                s.n_scales = scales.clamp(1, 4);
+                s.n_orient = orient.clamp(1, 8);
+                let max_fft = max_fft_for_device(&s.ctx.device);
+                s.pipeline = SteerablePipeline::new(&s.ctx, s.width, s.height, max_fft, s.n_scales, s.n_orient);
+            }
+        }
+    }) as Box<dyn FnMut(u32, u32)>);
+    js_sys::Reflect::set(&window, &"setQuality".into(), set_quality.as_ref())?;
+    set_quality.forget();
+
     js_sys::Reflect::set(&window, &"__mamp_fps".into(), &JsValue::from_f64(0.0))?;
 
     Ok(())
@@ -206,7 +224,7 @@ fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
     if w == s.width && h == s.height { return; }
     log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
-    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device));
+    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device), s.n_scales, s.n_orient);
     s.width = w;
     s.height = h;
 }

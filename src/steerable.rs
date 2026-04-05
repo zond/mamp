@@ -12,9 +12,9 @@ use wasm_bindgen::JsCast;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
-const N_SCALES: u32 = 2;
-const N_ORIENT: u32 = 2;
-const N_BAND: usize = (N_SCALES * N_ORIENT) as usize; // 4
+const MAX_SCALES: u32 = 4;
+const MAX_ORIENT: u32 = 8;
+const MAX_BAND: usize = (MAX_SCALES * MAX_ORIENT) as usize;
 
 fn next_pow2(n: u32) -> u32 {
     if n.is_power_of_two() { n } else { n.next_power_of_two() }
@@ -41,8 +41,9 @@ struct BlitParams { w: u32, h: u32 }
 
 #[allow(dead_code)]
 pub struct SteerablePipeline {
-    pub ow: u32, pub oh: u32, // original dimensions
-    pub pw: u32, pub ph: u32, // padded (power of 2)
+    pub ow: u32, pub oh: u32,
+    pub pw: u32, pub ph: u32,
+    pub n_scales: u32, pub n_orient: u32, pub n_band: usize,
 
     // Compute pipelines
     pl_r2y: ComputePipeline,
@@ -75,19 +76,19 @@ pub struct SteerablePipeline {
     b_sm_re: Buffer, b_sm_im: Buffer, // sub-band modified
     b_ms_re: Buffer, b_ms_im: Buffer, // modified spectrum
 
-    // Buffers — per sub-band persistent state (12 sets)
-    prev_re: [Buffer; N_BAND],
-    prev_im: [Buffer; N_BAND],
-    lp_hi: [Buffer; N_BAND],
-    lp_lo: [Buffer; N_BAND],
+    // Buffers — per sub-band persistent state
+    prev_re: Vec<Buffer>,
+    prev_im: Vec<Buffer>,
+    lp_hi: Vec<Buffer>,
+    lp_lo: Vec<Buffer>,
 
     // Pre-built uniforms (static)
     u_color: Buffer,
     u_blit: Buffer,
     u_phase: Buffer,
-    // Filter uniforms (12 bandpass + 2 residuals)
-    u_filt: [Buffer; N_BAND],
-    u_filt_acc: [Buffer; N_BAND],
+    // Filter uniforms per sub-band + 2 residuals
+    u_filt: Vec<Buffer>,
+    u_filt_acc: Vec<Buffer>,
     u_res_hi: Buffer,
     u_res_lo: Buffer,
     // FFT uniforms (4 configs: row_fwd, col_fwd, row_inv, col_inv)
@@ -98,7 +99,10 @@ pub struct SteerablePipeline {
 }
 
 impl SteerablePipeline {
-    pub fn new(ctx: &GpuContext, w: u32, h: u32, max_fft: u32) -> Self {
+    pub fn new(ctx: &GpuContext, w: u32, h: u32, max_fft: u32, n_scales: u32, n_orient: u32) -> Self {
+        assert!(n_scales >= 1 && n_scales <= MAX_SCALES);
+        assert!(n_orient >= 1 && n_orient <= MAX_ORIENT);
+        let n_band = (n_scales * n_orient) as usize;
         let pw = next_pow2(w).min(max_fft);
         let ph = next_pow2(h).min(max_fft);
         let ppix = (pw * ph) as u64;
@@ -126,10 +130,10 @@ impl SteerablePipeline {
         let b_sm_re = mk("smr", ppix*4); let b_sm_im = mk("smi", ppix*4);
         let b_ms_re = mk("msr", ppix*4); let b_ms_im = mk("msi", ppix*4);
 
-        let prev_re = std::array::from_fn(|i| mk(&format!("pr{}", i), ppix*4));
-        let prev_im = std::array::from_fn(|i| mk(&format!("pi{}", i), ppix*4));
-        let lp_hi = std::array::from_fn(|i| mk(&format!("lh{}", i), ppix*4));
-        let lp_lo = std::array::from_fn(|i| mk(&format!("ll{}", i), ppix*4));
+        let prev_re: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("pr{}", i), ppix*4)).collect();
+        let prev_im: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("pi{}", i), ppix*4)).collect();
+        let lp_hi: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("lh{}", i), ppix*4)).collect();
+        let lp_lo: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("ll{}", i), ppix*4)).collect();
 
         // ── Pipelines ──
         let mkc = |label: &str, src: &str| {
@@ -195,25 +199,25 @@ impl SteerablePipeline {
         let u_fft_ri = u("ufri", bytemuck::bytes_of(&FftParams { n: pw, log2n: log2pw, num: ph, inv: 1, stride: 1, fft_stride: pw, _p0: 0, _p1: 0 }));
         let u_fft_ci = u("ufci", bytemuck::bytes_of(&FftParams { n: ph, log2n: log2ph, num: pw, inv: 1, stride: pw, fft_stride: 1, _p0: 0, _p1: 0 }));
 
-        let u_filt: [Buffer; N_BAND] = std::array::from_fn(|i| {
-            let scale = (i / N_ORIENT as usize) as u32;
-            let orient = (i % N_ORIENT as usize) as u32;
+        let u_filt: Vec<Buffer> = (0..n_band).map(|i| {
+            let scale = (i / n_orient as usize) as u32;
+            let orient = (i % n_orient as usize) as u32;
             u(&format!("uf{}", i), bytemuck::bytes_of(&FilterParams {
-                w: pw, h: ph, norient: N_ORIENT, oidx: orient, scale, nscales: N_SCALES, ftype: 0, mode: 0,
+                w: pw, h: ph, norient: n_orient, oidx: orient, scale, nscales: n_scales, ftype: 0, mode: 0,
             }))
-        });
-        let u_filt_acc: [Buffer; N_BAND] = std::array::from_fn(|i| {
-            let scale = (i / N_ORIENT as usize) as u32;
-            let orient = (i % N_ORIENT as usize) as u32;
+        }).collect();
+        let u_filt_acc: Vec<Buffer> = (0..n_band).map(|i| {
+            let scale = (i / n_orient as usize) as u32;
+            let orient = (i % n_orient as usize) as u32;
             u(&format!("ua{}", i), bytemuck::bytes_of(&FilterParams {
-                w: pw, h: ph, norient: N_ORIENT, oidx: orient, scale, nscales: N_SCALES, ftype: 0, mode: 0,
+                w: pw, h: ph, norient: n_orient, oidx: orient, scale, nscales: n_scales, ftype: 0, mode: 0,
             }))
-        });
-        let u_res_hi = u("urh", bytemuck::bytes_of(&FilterParams { w: pw, h: ph, norient: N_ORIENT, oidx: 0, scale: 0, nscales: N_SCALES, ftype: 1, mode: 1 }));
-        let u_res_lo = u("url", bytemuck::bytes_of(&FilterParams { w: pw, h: ph, norient: N_ORIENT, oidx: 0, scale: 0, nscales: N_SCALES, ftype: 2, mode: 1 }));
+        }).collect();
+        let u_res_hi = u("urh", bytemuck::bytes_of(&FilterParams { w: pw, h: ph, norient: n_orient, oidx: 0, scale: 0, nscales: n_scales, ftype: 1, mode: 1 }));
+        let u_res_lo = u("url", bytemuck::bytes_of(&FilterParams { w: pw, h: ph, norient: n_orient, oidx: 0, scale: 0, nscales: n_scales, ftype: 2, mode: 1 }));
 
         Self {
-            ow: w, oh: h, pw, ph,
+            ow: w, oh: h, pw, ph, n_scales, n_orient, n_band,
             pl_r2y, pl_y2r, pl_fft, pl_filt, pl_filt_acc, pl_phase, pl_blit, surface,
             b_rgba_in, b_rgba_out, b_y, b_i, b_q, b_zeros,
             b_spec_re, b_spec_im, b_acc_re, b_acc_im, b_out_y, b_discard_im,
@@ -269,7 +273,7 @@ impl SteerablePipeline {
 
         // 4. Process each bandpass sub-band
         let wg = (pw.div_ceil(16), ph.div_ceil(16), 1);
-        for idx in 0..N_BAND {
+        for idx in 0..self.n_band {
             // 4a. Apply analysis filter: spec → sub_spec
             self.dispatch(dev, &mut enc, &self.pl_filt,
                 &[&self.u_filt[idx], &self.b_spec_re, &self.b_spec_im, &self.b_ss_re, &self.b_ss_im], wg);

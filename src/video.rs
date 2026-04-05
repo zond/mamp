@@ -104,15 +104,16 @@ impl VideoCapture {
         let mut attempts: Vec<(String, JsValue)> = Vec::new();
 
         if !device_id.is_empty() {
-            // Attempt 1: deviceId + processing resolution (the original working pattern)
+            // Attempt 1: deviceId + ideal resolution (always request camera's best)
             let vc = js_sys::Object::new();
             let exact = js_sys::Object::new();
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
-            js_sys::Reflect::set(&vc, &"width".into(), &JsValue::from_f64(self.width as f64))?;
-            js_sys::Reflect::set(&vc, &"height".into(), &JsValue::from_f64(self.height as f64))?;
+            let ideal_w = js_sys::Object::new();
+            js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
+            js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
             attempts.push((
-                format!("deviceId={} + {}x{}", device_id, self.width, self.height),
+                format!("deviceId={} + ideal:640", device_id),
                 vc.into(),
             ));
         }

@@ -175,7 +175,7 @@ impl VideoCapture {
 
         self.video.set_src_object(Some(&stream_obj));
 
-        // Detect facing mode to decide mirroring
+        // Detect facing mode + camera capabilities
         let tracks = stream_obj.get_video_tracks();
         if tracks.length() > 0 {
             let track: web_sys::MediaStreamTrack = tracks.get(0).unchecked_into();
@@ -184,6 +184,28 @@ impl VideoCapture {
                 .ok()
                 .and_then(|v| v.as_string());
             self.mirrored.set(facing.as_deref() != Some("environment"));
+
+            // Query max supported resolution via getCapabilities()
+            let caps: JsValue = js_sys::Reflect::get(track.as_ref(), &"getCapabilities".into())
+                .unwrap_or(JsValue::UNDEFINED);
+            if caps.is_function() {
+                let caps_fn: js_sys::Function = caps.unchecked_into();
+                if let Ok(caps_obj) = caps_fn.call0(track.as_ref()) {
+                    let get_max = |key: &str| -> u32 {
+                        js_sys::Reflect::get(&caps_obj, &key.into()).ok()
+                            .and_then(|v| js_sys::Reflect::get(&v, &"max".into()).ok())
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0) as u32
+                    };
+                    let max_w = get_max("width");
+                    let max_h = get_max("height");
+                    let cam_max = max_w.max(max_h);
+                    log::info!("Camera capabilities: max {}x{} (cam_max={})", max_w, max_h, cam_max);
+                    let window = web_sys::window().unwrap();
+                    let _ = js_sys::Reflect::set(&window, &"__mamp_cam_max".into(),
+                        &JsValue::from_f64(cam_max as f64));
+                }
+            }
         }
 
         let play_promise = self.video.play()?;

@@ -62,9 +62,10 @@ fn processing_size(cam_w: u32, cam_h: u32, max_width: u32) -> (u32, u32) {
     (w, h)
 }
 
-fn push_cam_w(cam_w: u32) {
+fn push_cam_info(cam_w: u32, cam_h: u32) {
     let window = web_sys::window().unwrap();
     let _ = js_sys::Reflect::set(&window, &"__mamp_cam_w".into(), &JsValue::from_f64(cam_w as f64));
+    let _ = js_sys::Reflect::set(&window, &"__mamp_cam_h".into(), &JsValue::from_f64(cam_h as f64));
 }
 
 fn perf_now() -> f64 {
@@ -108,7 +109,7 @@ pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(),
         let (cam_w, cam_h) = s.capture.actual_size();
         s.cam_w = cam_w;
         s.cam_h = cam_h;
-        push_cam_w(cam_w);
+        push_cam_info(cam_w, cam_h);
         let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
         log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
 
@@ -165,7 +166,7 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
         let (cam_w, cam_h) = s.capture.actual_size();
         s.cam_w = cam_w;
         s.cam_h = cam_h;
-        push_cam_w(cam_w);
+        push_cam_info(cam_w, cam_h);
         let (w, h) = processing_size(cam_w, cam_h, max_w);
         log::info!("Resolution: {}x{} (camera {}x{})", w, h, cam_w, cam_h);
         s.capture.resize(w, h);
@@ -197,7 +198,7 @@ pub async fn start() -> Result<(), JsValue> {
     let mut capture = VideoCapture::new(initial_max, initial_max * 3 / 4)?;
     capture.start_with_device("", "", initial_max).await?;
     let (cam_w, cam_h) = capture.actual_size();
-    push_cam_w(cam_w);
+    push_cam_info(cam_w, cam_h);
     let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
     log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);
     capture.resize(w, h);

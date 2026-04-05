@@ -268,23 +268,42 @@
                 freqBw.addEventListener('input', updateFreqs);
                 updateFreqs();
 
-                // Rebuild resolution dropdown based on camera capability
+                // Rebuild resolution dropdown: show widths where FFT pad size changes
+                function nextPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
                 function updateResOptions() {
+                    const camMax = window.__mamp_cam_max || window.__mamp_cam_w || 640;
                     const camW = window.__mamp_cam_w || 640;
+                    const camH = window.__mamp_cam_h || 480;
+                    const aspect = camH / camW; // h/w ratio (>1 in portrait)
                     const sel = document.getElementById('resolution');
                     const cur = sel.value;
-                    const all = [160, 240, 320, 480, 640, 960, 1280];
-                    const valid = all.filter(v => v <= camW);
+
+                    // For each power-of-2 pad width, find the max processing width
+                    // that fits. Only include if camera supports it.
+                    const options = [];
+                    for (const padW of [128, 256, 512, 1024, 2048]) {
+                        const w = padW; // max width that pads to padW
+                        if (w > camMax) break;
+                        const h = Math.round(w * aspect);
+                        const padH = nextPow2(h);
+                        const pixels = padW * padH;
+                        const label = `${w} (${pixels >= 1048576 ? (pixels / 1048576).toFixed(1) + 'M' : Math.round(pixels / 1024) + 'K'})`;
+                        options.push({ value: w, label });
+                    }
+
                     sel.innerHTML = '';
-                    valid.forEach(v => {
+                    options.forEach(({ value, label }) => {
                         const opt = document.createElement('option');
-                        opt.value = v;
-                        opt.textContent = v;
-                        if (String(v) === cur || (v === Math.max(...valid) && !valid.includes(parseInt(cur)))) {
-                            opt.selected = true;
-                        }
+                        opt.value = value;
+                        opt.textContent = label;
+                        if (String(value) === cur) opt.selected = true;
                         sel.appendChild(opt);
                     });
+                    // Default: select the largest option <= 640, or the last option
+                    if (!sel.value || !options.some(o => String(o.value) === sel.value)) {
+                        const best = options.filter(o => o.value <= 640).pop() || options[options.length - 1];
+                        if (best) sel.value = best.value;
+                    }
                 }
                 updateResOptions();
 

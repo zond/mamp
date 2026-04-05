@@ -222,12 +222,20 @@ async fn next_frame() {
 
 fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
     let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
-    if w == s.width && h == s.height { return; }
+    if w == s.width && h == s.height {
+        log::info!("Resolution unchanged: {}x{} (camera {}x{}, max {})",
+            w, h, s.cam_w, s.cam_h, max_w);
+        return;
+    }
     log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
     s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device), s.n_scales, s.n_orient);
     s.width = w;
     s.height = h;
+    // Push resolution to JS immediately so status text updates
+    let window = web_sys::window().unwrap();
+    let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
+        &JsValue::from_str(&format!("{}x{}", w, h)));
 }
 
 async fn run_loop(shared: Rc<Shared>) {

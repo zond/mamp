@@ -1,13 +1,12 @@
 // steerable.rs — Complex Steerable Pyramid phase-based motion magnification
 //
-// Per frame (~36 GPU dispatches at 2s×2o):
-// 1. RGBA → Y,I,Q (pad)         2. FFT(Y)
-// 3. For each bandpass sub-band: apply_filter → IFFT → phase_amplify → FFT → filter_accum
-// 4. Residuals: filter_accum     5. IFFT(accum) → modified Y
-// 6. YIQ → RGBA                  7. Blit to canvas
+// Per frame (5 dispatches/band + overhead):
+// 1. RGBA → Y,I,Q (pad)         2. FFT(Y)        3. Clear accumulators
+// 4. Per sub-band: IFFT_col(+filter) → IFFT_row → phase → FFT_row → FFT_col(+accum)
+// 5. Residual: filter_accum      6. IFFT(accum) → Y    7. YIQ → RGBA → blit
 //
-// Optimized: pre-created bind groups, pre-computed filter textures,
-// 2 compute passes per frame.
+// Filter multiply fused into FFT load/store to save 2 dispatches per band.
+// Single compute pass, pre-created bind groups, pre-computed filter textures.
 
 use crate::gpu::GpuContext;
 use bytemuck::{Pod, Zeroable};
@@ -48,8 +47,9 @@ pub struct SteerablePipeline {
     pl_r2y: ComputePipeline,
     pl_y2r: ComputePipeline,
     pl_fft: ComputePipeline,
-    pl_apply: ComputePipeline,
-    pl_accum: ComputePipeline,
+    pl_fft_fl: ComputePipeline,  // FFT with filter multiply on load
+    pl_fft_fsa: ComputePipeline, // FFT with filter multiply + accumulate on store
+    pl_accum: ComputePipeline,   // kept for residual only
     pl_phase: ComputePipeline,
     pl_clear: ComputePipeline,
     pl_blit: RenderPipeline,
@@ -64,13 +64,11 @@ pub struct SteerablePipeline {
     bg_clear_acc: BindGroup,
     bg_fft_y_row: BindGroup,
     bg_fft_y_col: BindGroup,
-    bg_apply: Vec<BindGroup>,
-    bg_ifft_sb_col: BindGroup,
+    bg_ifft_filt_col: Vec<BindGroup>,  // fused: filter load + IFFT col (per band)
     bg_ifft_sb_row: BindGroup,
     bg_phase: Vec<BindGroup>,
     bg_fft_mod_row: BindGroup,
-    bg_fft_mod_col: BindGroup,
-    bg_accum: Vec<BindGroup>,
+    bg_fft_accum_col: Vec<BindGroup>,  // fused: FFT col + filter accum (per band)
     bg_res: BindGroup,
     bg_ifft_final_col: BindGroup,
     bg_ifft_final_row: BindGroup,
@@ -110,10 +108,8 @@ impl SteerablePipeline {
         let b_out_y = mk("oy", ppix * 4);
         let b_discard_im = mk("di", ppix * 4);
         let b_tmp_re = mk("tr", ppix * 4); let b_tmp_im = mk("ti", ppix * 4);
-        let b_ss_re = mk("ssr", ppix*4); let b_ss_im = mk("ssi", ppix*4);
         let b_sp_re = mk("spr", ppix*4); let b_sp_im = mk("spi", ppix*4);
         let b_sm_re = mk("smr", ppix*4); let b_sm_im = mk("smi", ppix*4);
-        let b_ms_re = mk("msr", ppix*4); let b_ms_im = mk("msi", ppix*4);
 
         let prev_re: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("pr{}", i), ppix*4)).collect();
         let prev_im: Vec<Buffer> = (0..n_band).map(|i| mk(&format!("pi{}", i), ppix*4)).collect();
@@ -141,8 +137,11 @@ impl SteerablePipeline {
         let pl_y2r = mkc("y2r", include_str!("shaders/yiq_to_rgba.wgsl"));
         let fft_src = include_str!("shaders/fft.wgsl").replace("/*SHARED_SIZE*/", &max_fft.to_string());
         let pl_fft = mkc("fft", &fft_src);
+        let fft_fl_src = include_str!("shaders/fft_filter_load.wgsl").replace("/*SHARED_SIZE*/", &max_fft.to_string());
+        let pl_fft_fl = mkc("fft_fl", &fft_fl_src);
+        let fft_fsa_src = include_str!("shaders/fft_filter_store_accum.wgsl").replace("/*SHARED_SIZE*/", &max_fft.to_string());
+        let pl_fft_fsa = mkc("fft_fsa", &fft_fsa_src);
         let pl_precomp = mkc("precomp", include_str!("shaders/precompute_filter.wgsl"));
-        let pl_apply = mkc("apply", include_str!("shaders/apply_filter.wgsl"));
         let pl_accum = mkc("accum", include_str!("shaders/apply_filter_accum.wgsl"));
         let pl_phase = mkc("phase", include_str!("shaders/phase_amplify.wgsl"));
         let pl_add = mkc("add", include_str!("shaders/add_buffers.wgsl"));
@@ -277,11 +276,10 @@ impl SteerablePipeline {
         let bg_fft_y_row = mk_bg(&pl_fft, &[&u_fft_rf, &b_y, &b_zeros, &b_tmp_re, &b_tmp_im]);
         let bg_fft_y_col = mk_bg(&pl_fft, &[&u_fft_cf, &b_tmp_re, &b_tmp_im, &b_spec_re, &b_spec_im]);
 
-        // Per sub-band: apply filter (analysis)
-        let bg_apply: Vec<BindGroup> = (0..n_band).map(|i| {
-            mk_bg(&pl_apply, &[&u_pdims, &filt_band[i], &b_spec_re, &b_spec_im, &b_ss_re, &b_ss_im])
+        // Per sub-band: fused IFFT col + filter load (reads spectrum, applies filter, writes to tmp)
+        let bg_ifft_filt_col: Vec<BindGroup> = (0..n_band).map(|i| {
+            mk_bg(&pl_fft_fl, &[&u_fft_ci, &b_spec_re, &b_spec_im, &b_tmp_re, &b_tmp_im, &filt_band[i]])
         }).collect();
-        let bg_ifft_sb_col = mk_bg(&pl_fft, &[&u_fft_ci, &b_ss_re, &b_ss_im, &b_tmp_re, &b_tmp_im]);
         let bg_ifft_sb_row = mk_bg(&pl_fft, &[&u_fft_ri, &b_tmp_re, &b_tmp_im, &b_sp_re, &b_sp_im]);
         let bg_phase: Vec<BindGroup> = (0..n_band).map(|i| {
             mk_bg(&pl_phase, &[&u_phase, &b_sp_re, &b_sp_im,
@@ -289,11 +287,9 @@ impl SteerablePipeline {
                 &b_sm_re, &b_sm_im])
         }).collect();
         let bg_fft_mod_row = mk_bg(&pl_fft, &[&u_fft_rf, &b_sm_re, &b_sm_im, &b_tmp_re, &b_tmp_im]);
-        let bg_fft_mod_col = mk_bg(&pl_fft, &[&u_fft_cf, &b_tmp_re, &b_tmp_im, &b_ms_re, &b_ms_im]);
-
-        // Per sub-band: filter accumulate (reconstruction)
-        let bg_accum: Vec<BindGroup> = (0..n_band).map(|i| {
-            mk_bg(&pl_accum, &[&u_pdims, &filt_band[i], &b_ms_re, &b_ms_im, &b_acc_re, &b_acc_im])
+        // Per sub-band: fused FFT col + filter accum (reads tmp, applies filter, accumulates into acc)
+        let bg_fft_accum_col: Vec<BindGroup> = (0..n_band).map(|i| {
+            mk_bg(&pl_fft_fsa, &[&u_fft_cf, &b_tmp_re, &b_tmp_im, &b_acc_re, &b_acc_im, &filt_band[i]])
         }).collect();
 
         // Residual (pre-summed filt_hi² + filt_lo² into single buffer)
@@ -315,12 +311,12 @@ impl SteerablePipeline {
 
         Self {
             ow: w, oh: h, pw, ph, n_scales, n_orient, n_band,
-            pl_r2y, pl_y2r, pl_fft, pl_apply, pl_accum, pl_phase, pl_clear, pl_blit, surface,
+            pl_r2y, pl_y2r, pl_fft, pl_fft_fl, pl_fft_fsa, pl_accum, pl_phase, pl_clear, pl_blit, surface,
             b_rgba_in, u_phase,
             bg_r2y, bg_clear_acc, bg_fft_y_row, bg_fft_y_col,
-            bg_apply, bg_ifft_sb_col, bg_ifft_sb_row,
-            bg_phase, bg_fft_mod_row, bg_fft_mod_col,
-            bg_accum, bg_res,
+            bg_ifft_filt_col, bg_ifft_sb_row,
+            bg_phase, bg_fft_mod_row,
+            bg_fft_accum_col, bg_res,
             bg_ifft_final_col, bg_ifft_final_row, bg_y2r, bg_blit,
             first_frame: true,
         }
@@ -367,18 +363,16 @@ impl SteerablePipeline {
             Self::rec(&mut p, &self.pl_clear, &self.bg_clear_acc, wg);
 
             for idx in 0..self.n_band {
-                // Analysis: apply pre-computed filter
-                Self::rec(&mut p, &self.pl_apply, &self.bg_apply[idx], wg);
-                // Inverse 2D FFT: sub-band spectrum → spatial
-                Self::rec(&mut p, &self.pl_fft, &self.bg_ifft_sb_col, (pw, 1, 1));
+                // Fused: filter load + IFFT col (spectrum → tmp, with filter multiply)
+                Self::rec(&mut p, &self.pl_fft_fl, &self.bg_ifft_filt_col[idx], (pw, 1, 1));
+                // IFFT row (tmp → spatial)
                 Self::rec(&mut p, &self.pl_fft, &self.bg_ifft_sb_row, (ph, 1, 1));
                 // Phase amplification
                 Self::rec(&mut p, &self.pl_phase, &self.bg_phase[idx], wg);
-                // Forward 2D FFT: modified spatial → spectrum
+                // FFT row (modified spatial → tmp)
                 Self::rec(&mut p, &self.pl_fft, &self.bg_fft_mod_row, (ph, 1, 1));
-                Self::rec(&mut p, &self.pl_fft, &self.bg_fft_mod_col, (pw, 1, 1));
-                // Reconstruction: apply pre-computed filter and accumulate
-                Self::rec(&mut p, &self.pl_accum, &self.bg_accum[idx], wg);
+                // Fused: FFT col + filter accum (tmp → accumulator, with filter multiply)
+                Self::rec(&mut p, &self.pl_fft_fsa, &self.bg_fft_accum_col[idx], (pw, 1, 1));
             }
 
             // Residual (pre-summed hi² + lo² in single buffer)

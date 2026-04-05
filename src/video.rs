@@ -71,7 +71,8 @@ impl VideoCapture {
     }
 
     /// Start camera with optional device ID and facing mode.
-    pub async fn start_with_device(&self, device_id: &str, facing_mode: &str) -> Result<(), JsValue> {
+    /// Start camera. `target_width`: 0 = camera picks best, >0 = ideal hint.
+    pub async fn start_with_device(&self, device_id: &str, facing_mode: &str, target_width: u32) -> Result<(), JsValue> {
         // Stop any existing stream
         let switching = if let Some(old_stream) = self.video.src_object() {
             let old: web_sys::MediaStream = old_stream.unchecked_into();
@@ -104,16 +105,17 @@ impl VideoCapture {
         let mut attempts: Vec<(String, JsValue)> = Vec::new();
 
         if !device_id.is_empty() {
-            // Attempt 1: deviceId + ideal resolution (always request camera's best)
             let vc = js_sys::Object::new();
             let exact = js_sys::Object::new();
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
-            let ideal_w = js_sys::Object::new();
-            js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(self.width))?;
-            js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
+            if target_width > 0 {
+                let ideal_w = js_sys::Object::new();
+                js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(target_width))?;
+                js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
+            }
             attempts.push((
-                format!("deviceId={} + ideal:{}", device_id, self.width),
+                format!("deviceId={} w={}", device_id, if target_width > 0 { target_width.to_string() } else { "best".into() }),
                 vc.into(),
             ));
         }

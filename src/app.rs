@@ -97,7 +97,7 @@ pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(),
 
     {
         let s = shared.state.borrow();
-        s.capture.start_with_device(device_id, facing_mode).await?;
+        s.capture.start_with_device(device_id, facing_mode, 0).await?;
     }
 
     {
@@ -156,7 +156,7 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
 
     {
         let s = shared.state.borrow();
-        s.capture.start_with_device(&device_id, &facing).await?;
+        s.capture.start_with_device(&device_id, &facing, max_w).await?;
     }
 
     {
@@ -194,7 +194,7 @@ pub async fn start() -> Result<(), JsValue> {
 
     let initial_max = DEFAULT_MAX_WIDTH;
     let mut capture = VideoCapture::new(initial_max, initial_max * 3 / 4)?;
-    capture.start_with_device("", "").await?;
+    capture.start_with_device("", "", 0).await?;
     let (cam_w, cam_h) = capture.actual_size();
     push_cam_w(cam_w);
     let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);

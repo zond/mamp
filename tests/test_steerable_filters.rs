@@ -190,3 +190,157 @@ fn test_filter_orientation_selectivity() {
         "Horizontal grating should be strongest at orientation 0, got {}", max_orient);
     println!("✓ Orientation selectivity: horizontal → orientation 0");
 }
+
+#[test]
+fn test_partition_of_unity() {
+    // Sum of |filter|^2 over all sub-bands + residuals should ≈ 1 at every frequency.
+    // This is the critical property for perfect reconstruction.
+    let (device, queue) = create_test_device();
+    let w = 64u32;
+    let h = 64u32;
+    let n_orient = 4u32;
+    let n_scales = 3u32;
+    let total = (w * h) as usize;
+
+    // Accumulate |filter|^2 for all components
+    let mut sum_sq = vec![0.0f32; total];
+
+    // Highpass residual
+    let hi = get_filter_magnitude(&device, &queue, w, h, n_orient, 0, 0, n_scales, 1);
+    for i in 0..total { sum_sq[i] += hi[i] * hi[i]; }
+
+    // Lowpass residual
+    let lo = get_filter_magnitude(&device, &queue, w, h, n_orient, 0, 0, n_scales, 2);
+    for i in 0..total { sum_sq[i] += lo[i] * lo[i]; }
+
+    // All bandpass sub-bands
+    for s in 0..n_scales {
+        for o in 0..n_orient {
+            let bp = get_filter_magnitude(&device, &queue, w, h, n_orient, o, s, n_scales, 0);
+            for i in 0..total { sum_sq[i] += bp[i] * bp[i]; }
+        }
+    }
+
+    // Check along the x-axis (fy=0) excluding DC
+    let mut max_err: f32 = 0.0;
+    let mut worst_fx = 0usize;
+    for fx in 1..w as usize / 2 {
+        let err = (sum_sq[fx] - 1.0).abs();
+        if err > max_err {
+            max_err = err;
+            worst_fx = fx;
+        }
+    }
+
+    println!("  Partition of unity — max error: {:.4} at fx={} (radius={:.3})",
+        max_err, worst_fx, worst_fx as f32 / w as f32);
+
+    // Print a few values for debugging
+    for fx in [1, 4, 8, 16, 24, 28, 31, 32].iter() {
+        if *fx < w as usize {
+            println!("    fx={}: sum|H|^2 = {:.4}", fx, sum_sq[*fx]);
+        }
+    }
+
+    assert!(max_err < 0.3,
+        "Partition of unity violated: max error {:.4} at fx={}", max_err, worst_fx);
+    println!("✓ Partition of unity: max error {:.4}", max_err);
+}
+
+#[test]
+fn test_scale_selectivity() {
+    // Each scale should respond most strongly to its target frequency range.
+    // Scale 0 (finest) → highest frequencies, scale 2 (coarsest) → lowest.
+    let (device, queue) = create_test_device();
+    let w = 64u32;
+    let h = 64u32;
+    let n_orient = 4u32;
+    let n_scales = 3u32;
+    let total = (w * h) as usize;
+
+    // Test frequencies at the center of each scale's passband.
+    // With cutoffs at -1, -2, -3, -4:
+    // Scale 0: center log_rad = -1.5 → radius = 2^-1.5 = 0.354 → fx ≈ 23
+    // Scale 1: center log_rad = -2.5 → radius = 2^-2.5 = 0.177 → fx ��� 11
+    // Scale 2: center log_rad = -3.5 → radius = 2^-3.5 = 0.088 → fx ≈ 6
+    let test_freqs = [23usize, 11, 6];
+
+    for (target_scale, &fx) in test_freqs.iter().enumerate() {
+        let mut spec_re = vec![0.0f32; total];
+        spec_re[fx] = 1.0; // energy at (fx, 0)
+
+        let mut scale_energies = vec![0.0f32; n_scales as usize];
+        for s in 0..n_scales {
+            // Sum energy across all orientations for this scale
+            for o in 0..n_orient {
+                let (filt_re, filt_im) = apply_filter(
+                    &device, &queue, &spec_re, &vec![0.0f32; total],
+                    w, h, n_orient, o, s, n_scales, 0,
+                );
+                let energy: f32 = filt_re.iter().zip(filt_im.iter())
+                    .map(|(r, i)| r * r + i * i).sum();
+                scale_energies[s as usize] += energy;
+            }
+        }
+
+        let best_scale = scale_energies.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap().0;
+
+        println!("  fx={} (target scale {}): energies={:?}, best={}",
+            fx, target_scale, scale_energies, best_scale);
+
+        assert_eq!(best_scale, target_scale,
+            "fx={} should map to scale {}, got {}", fx, target_scale, best_scale);
+    }
+
+    println!("✓ Scale selectivity: correct frequency-to-scale mapping");
+}
+
+#[test]
+fn test_highpass_residual_response() {
+    // Highpass residual should pass frequencies above the finest scale
+    // and block lower frequencies
+    let (device, queue) = create_test_device();
+    let w = 64u32;
+    let h = 64u32;
+
+    let hi = get_filter_magnitude(&device, &queue, w, h, 4, 0, 0, 3, 1);
+
+    // Print highpass response along x-axis for debugging
+    println!("  Highpass response along x-axis:");
+    for fx in [1, 4, 8, 16, 24, 28, 31, 32].iter() {
+        if *fx < w as usize {
+            println!("    fx={}: {:.4}", fx, hi[*fx]);
+        }
+    }
+
+    // Highest frequency should have the most highpass energy
+    // With the new radial tiling, highpass = sqrt(1 - lowmask_0^2)
+    // which transitions around cutoff = -0.5 (radius=0.707, but that's > 0.5 so it wraps)
+    // The highpass should pass everything above the finest bandpass
+    assert!(hi[w as usize / 2] > 0.01 || hi[w as usize / 2 - 1] > 0.01,
+        "Highpass should have nonzero response near Nyquist");
+    assert!(hi[4] < 0.1, "Highpass should block low freq, got {} at fx=4", hi[4]);
+    println!("✓ Highpass: blocks low freq, nonzero at high freq");
+}
+
+#[test]
+fn test_lowpass_residual_response() {
+    // Lowpass residual should pass frequencies below the coarsest scale
+    // and block higher frequencies
+    let (device, queue) = create_test_device();
+    let w = 64u32;
+    let h = 64u32;
+    let n_scales = 3u32;
+
+    let lo = get_filter_magnitude(&device, &queue, w, h, 4, 0, 0, n_scales, 2);
+
+    // Very low frequency should pass
+    assert!(lo[1] > 0.5, "Lowpass should pass very low freq, got {} at fx=1", lo[1]);
+
+    // High frequency should be blocked
+    assert!(lo[31] < 0.1, "Lowpass should block high freq, got {} at fx=31", lo[31]);
+
+    println!("✓ Lowpass: passes low freq ({:.2}), blocks high freq ({:.2})", lo[1], lo[31]);
+}

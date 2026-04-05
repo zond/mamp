@@ -145,6 +145,32 @@ pub fn run_compute_shader(
     data
 }
 
+/// Compile the FFT shader with a specific shared memory size.
+/// Returns the WGSL source with SHARED_SIZE replaced.
+pub fn fft_shader_source(shared_size: u32) -> String {
+    let template = include_str!("../src/shaders/fft.wgsl");
+    template.replace("/*SHARED_SIZE*/", &shared_size.to_string())
+}
+
+/// Query the device's max workgroup storage size.
+pub fn max_shared_memory(device: &wgpu::Device) -> u32 {
+    device.limits().max_compute_workgroup_storage_size
+}
+
+/// Determine the max FFT length this device supports.
+/// 2048 needs 16KB, 1024 needs 8KB.
+pub fn max_fft_length(device: &wgpu::Device) -> u32 {
+    let shared = max_shared_memory(device);
+    // Each complex value = 2 × f32 = 8 bytes. Two arrays (re + im).
+    // Total: max_n * 2 * 4 bytes = max_n * 8 bytes
+    let max_n = shared / 8;
+    // Cap at 2048 and ensure power of 2
+    if max_n >= 2048 { 2048 }
+    else if max_n >= 1024 { 1024 }
+    else if max_n >= 512 { 512 }
+    else { 256 }
+}
+
 /// Helper: convert f32 slice to bytes for buffer upload.
 pub fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(data).to_vec()

@@ -58,6 +58,29 @@ impl VideoCapture {
 
     /// Start camera with optional device ID (empty string = default camera).
     pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
+        // Fully release old camera first
+        if let Some(old_stream) = self.video.src_object() {
+            self.video.pause().ok();
+            let old: web_sys::MediaStream = old_stream.unchecked_into();
+            let tracks = old.get_tracks();
+            let n = tracks.length();
+            for i in 0..n {
+                let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
+                let state_before = js_sys::Reflect::get(track.as_ref(), &"readyState".into())
+                    .ok().and_then(|v| v.as_string()).unwrap_or_default();
+                log::info!("Stopping track: {} state={}", track.label(), state_before);
+                track.stop();
+                let state_after = js_sys::Reflect::get(track.as_ref(), &"readyState".into())
+                    .ok().and_then(|v| v.as_string()).unwrap_or_default();
+                log::info!("Track stopped: state={}", state_after);
+            }
+            self.video.set_src_object(None);
+            self.video.load();
+            log::info!("Old stream released ({} tracks stopped)", n);
+        } else {
+            log::info!("No old stream to release");
+        }
+
         let window = web_sys::window().unwrap();
         let navigator = window.navigator();
         let media_devices = navigator.media_devices()?;
@@ -65,33 +88,43 @@ impl VideoCapture {
         let constraints = MediaStreamConstraints::new();
         let video_constraints = js_sys::Object::new();
         if !device_id.is_empty() {
-            let exact = js_sys::Object::new();
-            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
-            js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
+            js_sys::Reflect::set(&video_constraints, &"deviceId".into(),
+                &JsValue::from_str(device_id))?;
         }
-        // Request 640 as ideal — covers all processing resolutions without
-        // wasting bandwidth, and stays fixed across res selector changes
         let ideal_w = js_sys::Object::new();
         js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
         js_sys::Reflect::set(&video_constraints, &"width".into(), &ideal_w)?;
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
-        // Open the NEW camera BEFORE stopping the old one — avoids the
-        // hardware-release race that causes NotReadableError on mobile.
-        // (Different cameras can be open simultaneously on most devices.)
-        let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
-        let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
+        // Retry with long delays — some devices need seconds to release camera hardware
+        log::info!("Requesting camera: deviceId={}", if device_id.is_empty() { "(default)" } else { device_id });
+        let mut stream = None;
+        let delays_ms = [500, 1500, 3000, 5000];
+        for (attempt, &ms) in delays_ms.iter().enumerate() {
+            log::info!("Waiting {}ms before attempt {}...", ms, attempt + 1);
+            let delay = js_sys::Promise::new(&mut |resolve, _| {
+                web_sys::window().unwrap()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+                    .unwrap();
+            });
+            wasm_bindgen_futures::JsFuture::from(delay).await?;
 
-        // Now stop the old stream
-        if let Some(old_stream) = self.video.src_object() {
-            let old: web_sys::MediaStream = old_stream.unchecked_into();
-            let tracks = old.get_tracks();
-            for i in 0..tracks.length() {
-                let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
-                track.stop();
+            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(s) => {
+                    log::info!("getUserMedia succeeded on attempt {}", attempt + 1);
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) if attempt < delays_ms.len() - 1 => {
+                    let msg = format!("{:?}", e);
+                    log::warn!("getUserMedia attempt {} failed: {}", attempt + 1, msg);
+                }
+                Err(e) => return Err(e),
             }
         }
+        let stream = stream.unwrap();
 
         let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
         self.video.set_src_object(Some(&stream_obj));

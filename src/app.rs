@@ -11,6 +11,17 @@ use crate::video::VideoCapture;
 
 const DEFAULT_MAX_WIDTH: u32 = 640;
 
+/// Max FFT length based on device's workgroup shared memory.
+/// 2048 needs 16KB, 1024 needs 8KB.
+fn max_fft_for_device(device: &wgpu::Device) -> u32 {
+    let shared = device.limits().max_compute_workgroup_storage_size;
+    // Each complex value = 2 × f32 = 8 bytes
+    let max_n = shared / 8;
+    if max_n >= 2048 { 2048 }
+    else if max_n >= 1024 { 1024 }
+    else { 512 }
+}
+
 struct Shared {
     state: RefCell<AppState>,
     running: Cell<bool>,
@@ -88,7 +99,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            s.pipeline = SteerablePipeline::new(&s.ctx, w, h, 1024);
+            s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device));
             s.width = w;
             s.height = h;
 
@@ -109,7 +120,7 @@ pub async fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).unwrap();
 
-    log::info!("Initializing EVM motion magnification...");
+    log::info!("Initializing steerable pyramid...");
 
     let ctx = GpuContext::new().await;
     log::info!("WebGPU device ready");
@@ -126,7 +137,7 @@ pub async fn start() -> Result<(), JsValue> {
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let pipeline = SteerablePipeline::new(&ctx, w, h, 1024);
+    let pipeline = SteerablePipeline::new(&ctx, w, h, max_fft_for_device(&ctx.device));
     log::info!("Steerable pipeline ready: {}x{}", w, h);
 
     let shared = Rc::new(Shared {
@@ -195,7 +206,7 @@ fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
     if w == s.width && h == s.height { return; }
     log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
-    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, 1024);
+    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, max_fft_for_device(&s.ctx.device));
     s.width = w;
     s.height = h;
 }

@@ -37,9 +37,6 @@ features = [
     "Window",
     "CanvasRenderingContext2d",
     "Performance",
-    "Request",
-    "RequestInit",
-    "Response",
 ]
 
 [features]

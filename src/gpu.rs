@@ -9,8 +9,6 @@ pub struct GpuContext {
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
-    pub rgba_to_chw_module: ShaderModule,
-    pub chw_to_rgba_module: ShaderModule,
 }
 
 impl GpuContext {
@@ -76,16 +74,6 @@ impl GpuContext {
             .await
             .expect("Failed to create WebGPU device");
 
-        let rgba_to_chw_module = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("rgba_to_chw"),
-            source: ShaderSource::Wgsl(include_str!("shaders/rgba_to_chw.wgsl").into()),
-        });
-
-        let chw_to_rgba_module = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("chw_to_rgba"),
-            source: ShaderSource::Wgsl(include_str!("shaders/chw_to_rgba.wgsl").into()),
-        });
-
         // Drop the temporary surface — we'll create the real one after we know the resolution
         drop(surface);
 
@@ -94,8 +82,6 @@ impl GpuContext {
             adapter,
             device,
             queue,
-            rgba_to_chw_module,
-            chw_to_rgba_module,
         }
     }
 

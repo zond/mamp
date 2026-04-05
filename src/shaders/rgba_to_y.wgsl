@@ -26,15 +26,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let out_idx = y * params.padded_width + x;
 
-    // Outside original image: zero padding
-    if x >= params.orig_width || y >= params.orig_height {
-        y_output[out_idx] = 0.0;
-        i_output[out_idx] = 0.0;
-        q_output[out_idx] = 0.0;
-        return;
+    // Outside original image: mirror/reflect padding (reduces FFT edge ringing)
+    var sx = x;
+    var sy = y;
+    if sx >= params.orig_width {
+        sx = 2u * params.orig_width - sx - 2u;
     }
+    if sy >= params.orig_height {
+        sy = 2u * params.orig_height - sy - 2u;
+    }
+    sx = clamp(sx, 0u, params.orig_width - 1u);
+    sy = clamp(sy, 0u, params.orig_height - 1u);
 
-    let in_idx = y * params.orig_width + x;
+    let in_idx = sy * params.orig_width + sx;
     let packed = rgba_input[in_idx];
 
     let r = f32(packed & 0xFFu) / 255.0;

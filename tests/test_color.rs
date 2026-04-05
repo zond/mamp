@@ -88,7 +88,7 @@ fn test_yiq_roundtrip() {
 
 #[test]
 fn test_padding() {
-    // Verify zero-padding works: 4×4 image padded to 8×8
+    // Verify mirror-padding works: 4×4 image padded to 8×8
     let (device, queue) = create_test_device();
     let w = 4u32;
     let h = 4u32;
@@ -119,16 +119,14 @@ fn test_padding() {
         }
     }
 
-    // Padded region should be 0
+    // Mirror-padded region should also be ~1.0 (reflecting white pixels)
     for row in 0..ph as usize {
         for col in 0..pw as usize {
-            if row >= h as usize || col >= w as usize {
-                let val = y[row * pw as usize + col];
-                assert!(val.abs() < 0.01,
-                    "Padded ({},{}) should be 0, got {}", col, row, val);
-            }
+            let val = y[row * pw as usize + col];
+            assert!((val - 1.0).abs() < 0.01,
+                "({},{}) should be ~1.0 (mirror of white), got {}", col, row, val);
         }
     }
 
-    println!("✓ Padding: 4×4→8×8, image=1.0, padding=0.0");
+    println!("✓ Padding: 4×4→8×8, mirror padding reflects white");
 }

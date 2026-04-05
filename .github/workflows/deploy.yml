@@ -41,8 +41,10 @@ jobs:
       - name: Optimize WASM with recent wasm-opt
         run: wasm-opt pkg/motion_mag_webgpu_bg.wasm -O -o pkg/motion_mag_webgpu_bg.wasm --all-features
 
-      - name: Copy index.html to pkg
-        run: cp index.html pkg/
+      - name: Copy index.html to pkg with git version
+        run: |
+          VERSION=$(git describe --always --dirty)
+          sed "s/@@BUILD_VERSION@@/$VERSION/" index.html > pkg/index.html
 
       - name: Copy weights to pkg (if present)
         run: |

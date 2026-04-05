@@ -85,21 +85,15 @@ impl VideoCapture {
 
         let constraints = MediaStreamConstraints::new();
         let video_constraints = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &video_constraints,
-            &"width".into(),
-            &JsValue::from(self.width),
-        )?;
-        js_sys::Reflect::set(
-            &video_constraints,
-            &"height".into(),
-            &JsValue::from(self.height),
-        )?;
         if !device_id.is_empty() {
             let exact = js_sys::Object::new();
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
         }
+        // Use ideal (not exact) resolution hints — camera picks closest match
+        let ideal_w = js_sys::Object::new();
+        js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(1280))?;
+        js_sys::Reflect::set(&video_constraints, &"width".into(), &ideal_w)?;
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 

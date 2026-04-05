@@ -136,21 +136,19 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
         if shared.state.try_borrow_mut().is_ok() { break; }
     }
 
-    // Read active camera info and resize before restarting
+    // Resize capture canvas to target, then restart camera so it provides
+    // enough pixels. Must restart FIRST — cam_w/cam_h from a previous
+    // low-res setting would make processing_size think nothing changed.
     let (device_id, facing) = {
         let mut s = shared.state.borrow_mut();
-        let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
-        if w == s.width && h == s.height {
-            log::info!("Resolution unchanged: {}x{}", w, h);
-            shared.running.set(true);
-            return Ok(());
-        }
-        s.capture.resize(w, h);
+        // Set capture canvas to target so camera requests ideal:max_w
+        let target_w = max_w.min(1280);
+        let target_h = (target_w as u64 * 3 / 4) as u32; // rough 4:3 guess
+        s.capture.resize(target_w, target_h);
         (s.active_device_id.clone(), s.active_facing.clone())
     };
 
     {
-        // Restart same camera at resolution matching new processing size
         let s = shared.state.borrow();
         s.capture.start_with_device(&device_id, &facing).await?;
     }
@@ -170,7 +168,7 @@ pub async fn set_resolution(max_w: u32) -> Result<(), JsValue> {
         let ratio = w as f64 / h as f64;
         let _ = js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio));
         let _ = js_sys::Reflect::set(&window, &"__mamp_res".into(),
-            &JsValue::from_str(&format!("{}x{}", w, h)));
+            &JsValue::from_str(&format!("{}x{} cam {}x{}", w, h, cam_w, cam_h)));
         shared.running.set(true);
     }
 

@@ -61,7 +61,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // cross = Im(current * conj(prev)) = ci*pr - cr*pi  = |z|² sin(Δθ)
     let dot = cr * pr + ci * pi_;
     let cross = ci * pr - cr * pi_;
-    let phase_diff = atan2(cross, dot);
+
+    // Magnitude gate: suppress noisy phase from low-energy pixels
+    let mag_sq = dot * dot + cross * cross;
+    var phase_diff = 0.0;
+    if mag_sq > 1e-10 {
+        phase_diff = atan2(cross, dot);
+    }
 
     // IIR temporal bandpass
     let new_lp_high = lp_high[idx] + params.alpha_high * (phase_diff - lp_high[idx]);

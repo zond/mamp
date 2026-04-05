@@ -94,6 +94,9 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
             let ratio = w as f64 / h as f64;
             js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
+        } else {
+            // Same resolution, different camera — reset phase state
+            s.pipeline.reset_state();
         }
         shared.running.set(true);
     }

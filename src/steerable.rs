@@ -17,7 +17,7 @@ const N_ORIENT: u32 = 4;
 const N_BAND: usize = (N_SCALES * N_ORIENT) as usize; // 12
 
 fn next_pow2(n: u32) -> u32 {
-    1u32 << (32 - (n - 1).leading_zeros())
+    if n.is_power_of_two() { n } else { n.next_power_of_two() }
 }
 
 // ── Uniform structs ──
@@ -224,6 +224,11 @@ impl SteerablePipeline {
             u_fft_rf, u_fft_cf, u_fft_ri, u_fft_ci,
             first_frame: true,
         }
+    }
+
+    /// Reset temporal state (call on camera switch even if resolution unchanged).
+    pub fn reset_state(&mut self) {
+        self.first_frame = true;
     }
 
     pub fn process_and_render(

@@ -33,15 +33,14 @@ impl GpuContext {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .expect("Failed to create surface");
 
-        // Try adapters in order: default (lets browser pick best compatible),
-        // then high-performance, then low-power. On PRIME/Optimus laptops,
-        // HighPerformance may pick a dGPU that can compute but can't present
-        // to the iGPU-driven display, causing black screen.
+        // Try LowPower first: on PRIME/Optimus laptops, HighPerformance picks
+        // the dGPU which can compute at 60fps but can't present to the iGPU
+        // display (black screen). LowPower picks the iGPU that drives the screen.
         log::info!("Requesting WebGPU adapter (compatible with surface)...");
         let prefs = [
+            PowerPreference::LowPower,
             PowerPreference::None,
             PowerPreference::HighPerformance,
-            PowerPreference::LowPower,
         ];
         let mut adapter = None;
         for pref in prefs {

@@ -5,8 +5,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
-use crate::evm::EvmPipeline;
 use crate::gpu::GpuContext;
+use crate::steerable::SteerablePipeline;
 use crate::video::VideoCapture;
 
 const DEFAULT_MAX_WIDTH: u32 = 640;
@@ -18,7 +18,7 @@ struct Shared {
 
 struct AppState {
     ctx: GpuContext,
-    evm: EvmPipeline,
+    pipeline: SteerablePipeline,
     capture: VideoCapture,
     amplification: f32,
     freq_low: f32,
@@ -88,7 +88,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
         if w != s.width || h != s.height {
             s.capture.resize(w, h);
-            s.evm = EvmPipeline::new(&s.ctx, w, h);
+            s.pipeline = SteerablePipeline::new(&s.ctx, w, h, 1024);
             s.width = w;
             s.height = h;
 
@@ -123,12 +123,12 @@ pub async fn start() -> Result<(), JsValue> {
     let ratio = w as f64 / h as f64;
     js_sys::Reflect::set(&window, &"__mamp_aspect".into(), &JsValue::from_f64(ratio))?;
 
-    let evm = EvmPipeline::new(&ctx, w, h);
-    log::info!("EVM pipeline ready: {}x{}", w, h);
+    let pipeline = SteerablePipeline::new(&ctx, w, h, 1024);
+    log::info!("Steerable pipeline ready: {}x{}", w, h);
 
     let shared = Rc::new(Shared {
         state: RefCell::new(AppState {
-            ctx, evm, capture,
+            ctx, pipeline, capture,
             amplification: 30.0, freq_low: 0.5, freq_high: 3.0,
             width: w, height: h, cam_w, cam_h,
         }),
@@ -170,7 +170,7 @@ pub async fn start() -> Result<(), JsValue> {
 
     let c5 = shared.clone();
     let set_res = Closure::wrap(Box::new(move |max_w: u32| {
-        if let Ok(mut s) = c5.state.try_borrow_mut() { rebuild_evm(&mut s, max_w); }
+        if let Ok(mut s) = c5.state.try_borrow_mut() { rebuild_pipeline(&mut s, max_w); }
     }) as Box<dyn FnMut(u32)>);
     js_sys::Reflect::set(&window, &"setResolution".into(), set_res.as_ref())?;
     set_res.forget();
@@ -187,12 +187,12 @@ async fn next_frame() {
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
 
-fn rebuild_evm(s: &mut AppState, max_w: u32) {
+fn rebuild_pipeline(s: &mut AppState, max_w: u32) {
     let (w, h) = processing_size(s.cam_w, s.cam_h, max_w);
     if w == s.width && h == s.height { return; }
     log::info!("Resize: {}x{} -> {}x{}", s.width, s.height, w, h);
     s.capture.resize(w, h);
-    s.evm = EvmPipeline::new(&s.ctx, w, h);
+    s.pipeline = SteerablePipeline::new(&s.ctx, w, h, 1024);
     s.width = w;
     s.height = h;
 }
@@ -218,8 +218,9 @@ async fn run_loop(shared: Rc<Shared>) {
         }
 
         {
-            let s = shared.state.borrow();
-            s.evm.process_and_render(&s.ctx, &frame, s.amplification, s.freq_low, s.freq_high, estimated_fps);
+            let mut s = shared.state.borrow_mut();
+            let AppState { ref ctx, ref mut pipeline, amplification, freq_low, freq_high, .. } = *s;
+            pipeline.process_and_render(ctx, &frame, amplification, freq_low, freq_high, estimated_fps);
         }
 
         frame_count += 1;

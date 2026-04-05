@@ -9,4 +9,6 @@ mod evm;
 #[cfg(target_arch = "wasm32")]
 mod gpu;
 #[cfg(target_arch = "wasm32")]
+mod steerable;
+#[cfg(target_arch = "wasm32")]
 mod video;

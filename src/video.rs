@@ -102,8 +102,25 @@ impl VideoCapture {
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
-        let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
-        let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
+        // Retry up to 3 times — mobile cameras can be slow to release hardware
+        let mut stream = None;
+        for attempt in 0..3 {
+            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(s) => { stream = Some(s); break; }
+                Err(e) if attempt < 2 => {
+                    log::warn!("getUserMedia attempt {} failed, retrying...", attempt + 1);
+                    let delay = js_sys::Promise::new(&mut |resolve, _| {
+                        web_sys::window().unwrap()
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 500)
+                            .unwrap();
+                    });
+                    wasm_bindgen_futures::JsFuture::from(delay).await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let stream = stream.unwrap();
 
         let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
         self.video.set_src_object(Some(&stream_obj));

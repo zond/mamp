@@ -58,27 +58,6 @@ impl VideoCapture {
 
     /// Start camera with optional device ID (empty string = default camera).
     pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
-        // Stop any existing stream first so the device is released
-        if let Some(old_stream) = self.video.src_object() {
-            self.video.pause().ok();
-            let old: web_sys::MediaStream = old_stream.unchecked_into();
-            let tracks = old.get_tracks();
-            for i in 0..tracks.length() {
-                let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
-                track.stop();
-            }
-            self.video.set_src_object(None);
-            self.video.load(); // force full teardown of old source
-
-            // Wait for the hardware to fully release the camera
-            let delay = js_sys::Promise::new(&mut |resolve, _| {
-                web_sys::window().unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 500)
-                    .unwrap();
-            });
-            wasm_bindgen_futures::JsFuture::from(delay).await?;
-        }
-
         let window = web_sys::window().unwrap();
         let navigator = window.navigator();
         let media_devices = navigator.media_devices()?;
@@ -98,26 +77,21 @@ impl VideoCapture {
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
-        // Retry with exponential backoff — mobile cameras can be slow to release
-        let mut stream = None;
-        let delays = [500, 1000, 2000];
-        for (attempt, &ms) in delays.iter().enumerate() {
-            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
-            match wasm_bindgen_futures::JsFuture::from(promise).await {
-                Ok(s) => { stream = Some(s); break; }
-                Err(e) if attempt < delays.len() - 1 => {
-                    log::warn!("getUserMedia attempt {} failed, retrying in {}ms...", attempt + 1, ms);
-                    let delay = js_sys::Promise::new(&mut |resolve, _| {
-                        web_sys::window().unwrap()
-                            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                            .unwrap();
-                    });
-                    wasm_bindgen_futures::JsFuture::from(delay).await?;
-                }
-                Err(e) => return Err(e),
+        // Open the NEW camera BEFORE stopping the old one — avoids the
+        // hardware-release race that causes NotReadableError on mobile.
+        // (Different cameras can be open simultaneously on most devices.)
+        let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
+        let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
+
+        // Now stop the old stream
+        if let Some(old_stream) = self.video.src_object() {
+            let old: web_sys::MediaStream = old_stream.unchecked_into();
+            let tracks = old.get_tracks();
+            for i in 0..tracks.length() {
+                let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
+                track.stop();
             }
         }
-        let stream = stream.unwrap();
 
         let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
         self.video.set_src_object(Some(&stream_obj));

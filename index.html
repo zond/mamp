@@ -94,15 +94,7 @@
         <label for="camera">Camera</label>
         <select id="camera" style="flex:1;min-width:0;"><option value="">Loading...</option></select>
         <label for="resolution">Res</label>
-        <select id="resolution">
-            <option value="160">160</option>
-            <option value="240">240</option>
-            <option value="320">320</option>
-            <option value="480">480</option>
-            <option value="640" selected>640</option>
-            <option value="960">960</option>
-            <option value="1280">1280</option>
-        </select>
+        <select id="resolution"></select>
         <label for="quality">Quality</label>
         <select id="quality">
             <option value="2,2">Fast (2s2o)</option>
@@ -240,6 +232,7 @@
                         if (window.__mamp_aspect) {
                             document.getElementById('output').style.aspectRatio = String(window.__mamp_aspect);
                         }
+                        updateResOptions();
                         dbg('Camera switched.');
                     } catch (err) {
                         dbg(`Camera switch failed: ${err}`);
@@ -275,12 +268,33 @@
                 freqBw.addEventListener('input', updateFreqs);
                 updateFreqs();
 
+                // Rebuild resolution dropdown based on camera capability
+                function updateResOptions() {
+                    const camW = window.__mamp_cam_w || 640;
+                    const sel = document.getElementById('resolution');
+                    const cur = sel.value;
+                    const all = [160, 240, 320, 480, 640, 960, 1280];
+                    const valid = all.filter(v => v <= camW);
+                    sel.innerHTML = '';
+                    valid.forEach(v => {
+                        const opt = document.createElement('option');
+                        opt.value = v;
+                        opt.textContent = v;
+                        if (String(v) === cur || (v === Math.max(...valid) && !valid.includes(parseInt(cur)))) {
+                            opt.selected = true;
+                        }
+                        sel.appendChild(opt);
+                    });
+                }
+                updateResOptions();
+
                 // Resolution selector (async — restarts camera at matching resolution)
                 document.getElementById('resolution').addEventListener('change', async (e) => {
                     const maxW = parseInt(e.target.value, 10);
                     dbg(`Setting resolution: ${maxW}p`);
                     try {
                         await wasm.set_resolution(maxW);
+                        updateResOptions();
                     } catch (err) {
                         dbg(`Resolution change failed: ${err}`);
                     }

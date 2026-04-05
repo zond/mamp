@@ -221,6 +221,7 @@
 
                 // Enumerate cameras now that permission is granted
                 await populateCameras();
+                updateResOptions();
 
                 // Camera switch — pass facing mode if known (more reliable than deviceId on mobile)
                 document.getElementById('camera').addEventListener('change', async (e) => {

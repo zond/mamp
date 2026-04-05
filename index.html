@@ -269,39 +269,30 @@
                 freqBw.addEventListener('input', updateFreqs);
                 updateFreqs();
 
-                // Rebuild resolution dropdown: show widths where FFT pad size changes
+                // Resolution dropdown: power-of-2 widths (FFT pad breakpoints)
                 function nextPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
                 function updateResOptions() {
-                    const camMax = window.__mamp_cam_max || window.__mamp_cam_w || 640;
                     const camW = window.__mamp_cam_w || 640;
                     const camH = window.__mamp_cam_h || 480;
-                    const aspect = camH / camW; // h/w ratio (>1 in portrait)
+                    const aspect = camH / camW;
                     const sel = document.getElementById('resolution');
-                    const cur = sel.value;
 
-                    // For each power-of-2 pad width, find the max processing width
-                    // that fits. Only include if camera supports it.
-                    const options = [];
-                    for (const padW of [128, 256, 512, 1024, 2048]) {
-                        const w = padW; // max width that pads to padW
-                        if (w > camMax) break;
+                    const options = [128, 256, 512, 1024, 2048].map(w => {
                         const h = Math.round(w * aspect);
-                        const padH = nextPow2(h);
-                        const pixels = padW * padH;
+                        const pixels = nextPow2(w) * nextPow2(h);
                         const label = `${w} (${pixels >= 1048576 ? (pixels / 1048576).toFixed(1) + 'M' : Math.round(pixels / 1024) + 'K'})`;
-                        options.push({ value: w, label });
-                    }
+                        return { value: w, label };
+                    });
 
                     sel.innerHTML = '';
                     options.forEach(({ value, label }) => {
                         const opt = document.createElement('option');
                         opt.value = value;
                         opt.textContent = label;
-                        if (String(value) === cur) opt.selected = true;
                         sel.appendChild(opt);
                     });
-                    // Select the option closest to actual processing width
-                    const procW = window.__mamp_proc_w || window.__mamp_cam_w || 640;
+
+                    const procW = window.__mamp_proc_w || 512;
                     const best = options.filter(o => o.value <= procW).pop() || options[0];
                     if (best) sel.value = best.value;
                 }

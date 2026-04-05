@@ -68,14 +68,7 @@ impl VideoCapture {
                 track.stop();
             }
             self.video.set_src_object(None);
-
-            // Give the hardware time to release the camera
-            let delay = js_sys::Promise::new(&mut |resolve, _| {
-                web_sys::window().unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 300)
-                    .unwrap();
-            });
-            wasm_bindgen_futures::JsFuture::from(delay).await?;
+            self.video.load(); // force full teardown of old source
         }
 
         let window = web_sys::window().unwrap();
@@ -102,17 +95,18 @@ impl VideoCapture {
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
-        // Retry up to 3 times — mobile cameras can be slow to release hardware
+        // Retry with exponential backoff — mobile cameras can be slow to release
         let mut stream = None;
-        for attempt in 0..3 {
+        let delays = [500, 1000, 2000];
+        for (attempt, &ms) in delays.iter().enumerate() {
             let promise = media_devices.get_user_media_with_constraints(&constraints)?;
             match wasm_bindgen_futures::JsFuture::from(promise).await {
                 Ok(s) => { stream = Some(s); break; }
-                Err(e) if attempt < 2 => {
-                    log::warn!("getUserMedia attempt {} failed, retrying...", attempt + 1);
+                Err(e) if attempt < delays.len() - 1 => {
+                    log::warn!("getUserMedia attempt {} failed, retrying in {}ms...", attempt + 1, ms);
                     let delay = js_sys::Promise::new(&mut |resolve, _| {
                         web_sys::window().unwrap()
-                            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 500)
+                            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
                             .unwrap();
                     });
                     wasm_bindgen_futures::JsFuture::from(delay).await?;

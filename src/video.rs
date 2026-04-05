@@ -59,27 +59,21 @@ impl VideoCapture {
     /// Start camera with optional device ID (empty string = default camera).
     pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
         // Fully release old camera first
-        if let Some(old_stream) = self.video.src_object() {
+        let had_old_stream = if let Some(old_stream) = self.video.src_object() {
             self.video.pause().ok();
             let old: web_sys::MediaStream = old_stream.unchecked_into();
             let tracks = old.get_tracks();
-            let n = tracks.length();
-            for i in 0..n {
+            for i in 0..tracks.length() {
                 let track: web_sys::MediaStreamTrack = tracks.get(i).unchecked_into();
-                let state_before = js_sys::Reflect::get(track.as_ref(), &"readyState".into())
-                    .ok().and_then(|v| v.as_string()).unwrap_or_default();
-                log::info!("Stopping track: {} state={}", track.label(), state_before);
                 track.stop();
-                let state_after = js_sys::Reflect::get(track.as_ref(), &"readyState".into())
-                    .ok().and_then(|v| v.as_string()).unwrap_or_default();
-                log::info!("Track stopped: state={}", state_after);
             }
             self.video.set_src_object(None);
             self.video.load();
-            log::info!("Old stream released ({} tracks stopped)", n);
+            log::info!("Old stream released");
+            true
         } else {
-            log::info!("No old stream to release");
-        }
+            false
+        };
 
         let window = web_sys::window().unwrap();
         let navigator = window.navigator();
@@ -88,8 +82,9 @@ impl VideoCapture {
         let constraints = MediaStreamConstraints::new();
         let video_constraints = js_sys::Object::new();
         if !device_id.is_empty() {
-            js_sys::Reflect::set(&video_constraints, &"deviceId".into(),
-                &JsValue::from_str(device_id))?;
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
+            js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
         }
         let ideal_w = js_sys::Object::new();
         js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
@@ -97,9 +92,16 @@ impl VideoCapture {
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);
 
-        // Retry with long delays — some devices need seconds to release camera hardware
         log::info!("Requesting camera: deviceId={}", if device_id.is_empty() { "(default)" } else { device_id });
-        let mut stream = None;
+
+        if !had_old_stream {
+            // First open — no delay needed
+            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
+            let stream = wasm_bindgen_futures::JsFuture::from(promise).await?;
+            return self.attach_stream(stream).await;
+        }
+
+        // Camera switch — retry with delays for hardware release
         let delays_ms = [500, 1500, 3000, 5000];
         for (attempt, &ms) in delays_ms.iter().enumerate() {
             log::info!("Waiting {}ms before attempt {}...", ms, attempt + 1);
@@ -114,17 +116,18 @@ impl VideoCapture {
             match wasm_bindgen_futures::JsFuture::from(promise).await {
                 Ok(s) => {
                     log::info!("getUserMedia succeeded on attempt {}", attempt + 1);
-                    stream = Some(s);
-                    break;
+                    return self.attach_stream(s).await;
                 }
                 Err(e) if attempt < delays_ms.len() - 1 => {
-                    let msg = format!("{:?}", e);
-                    log::warn!("getUserMedia attempt {} failed: {}", attempt + 1, msg);
+                    log::warn!("getUserMedia attempt {} failed: {:?}", attempt + 1, e);
                 }
                 Err(e) => return Err(e),
             }
         }
-        let stream = stream.unwrap();
+        unreachable!()
+    }
+
+    async fn attach_stream(&self, stream: JsValue) -> Result<(), JsValue> {
 
         let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
         self.video.set_src_object(Some(&stream_obj));

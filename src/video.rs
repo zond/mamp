@@ -110,10 +110,10 @@ impl VideoCapture {
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
             let ideal_w = js_sys::Object::new();
-            js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
+            js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(1280))?;
             js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
             attempts.push((
-                format!("deviceId={} + ideal:640", device_id),
+                format!("deviceId={} + ideal:1280", device_id),
                 vc.into(),
             ));
         }

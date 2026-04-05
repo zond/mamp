@@ -52,14 +52,40 @@ impl VideoCapture {
             ctx2d,
             width,
             height,
-            mirrored: Cell::new(true), // assume front-facing until proven otherwise
+            mirrored: Cell::new(true),
         })
     }
 
-    /// Start camera with optional device ID (empty string = default camera).
-    pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
-        // Fully release old camera first
-        let had_old_stream = if let Some(old_stream) = self.video.src_object() {
+    /// Build getUserMedia constraints.
+    fn build_constraints(device_id: &str, facing_mode: &str) -> Result<MediaStreamConstraints, JsValue> {
+        let constraints = MediaStreamConstraints::new();
+        let vc = js_sys::Object::new();
+
+        if !facing_mode.is_empty() {
+            // Prefer facingMode — more reliable on mobile
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(facing_mode))?;
+            js_sys::Reflect::set(&vc, &"facingMode".into(), &exact)?;
+        } else if !device_id.is_empty() {
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
+            js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
+        }
+
+        let ideal_w = js_sys::Object::new();
+        js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
+        js_sys::Reflect::set(&vc, &"width".into(), &ideal_w)?;
+
+        constraints.set_video(&vc.into());
+        constraints.set_audio(&JsValue::FALSE);
+        Ok(constraints)
+    }
+
+    /// Start camera with optional device ID and facing mode.
+    /// facing_mode: "user", "environment", or "" (unknown).
+    pub async fn start_with_device(&self, device_id: &str, facing_mode: &str) -> Result<(), JsValue> {
+        // Release old camera
+        let had_old = if let Some(old_stream) = self.video.src_object() {
             self.video.pause().ok();
             let old: web_sys::MediaStream = old_stream.unchecked_into();
             let tracks = old.get_tracks();
@@ -75,60 +101,63 @@ impl VideoCapture {
             false
         };
 
+        log::info!("Requesting camera: deviceId={} facingMode={}",
+            if device_id.is_empty() { "(default)" } else { device_id },
+            if facing_mode.is_empty() { "(none)" } else { facing_mode });
+
         let window = web_sys::window().unwrap();
-        let navigator = window.navigator();
-        let media_devices = navigator.media_devices()?;
+        let media_devices = window.navigator().media_devices()?;
 
-        let constraints = MediaStreamConstraints::new();
-        let video_constraints = js_sys::Object::new();
-        if !device_id.is_empty() {
-            let exact = js_sys::Object::new();
-            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
-            js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
-        }
-        let ideal_w = js_sys::Object::new();
-        js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
-        js_sys::Reflect::set(&video_constraints, &"width".into(), &ideal_w)?;
-        constraints.set_video(&video_constraints.into());
-        constraints.set_audio(&JsValue::FALSE);
-
-        log::info!("Requesting camera: deviceId={}", if device_id.is_empty() { "(default)" } else { device_id });
-
-        if !had_old_stream {
-            // First open — no delay needed
-            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
-            let stream = wasm_bindgen_futures::JsFuture::from(promise).await?;
+        // First open — no delay needed
+        if !had_old {
+            let c = Self::build_constraints(device_id, facing_mode)?;
+            let stream = wasm_bindgen_futures::JsFuture::from(
+                media_devices.get_user_media_with_constraints(&c)?
+            ).await?;
             return self.attach_stream(stream).await;
         }
 
-        // Camera switch — retry with delays for hardware release
-        let delays_ms = [500, 1500, 3000, 5000];
-        for (attempt, &ms) in delays_ms.iter().enumerate() {
-            log::info!("Waiting {}ms before attempt {}...", ms, attempt + 1);
-            let delay = js_sys::Promise::new(&mut |resolve, _| {
-                web_sys::window().unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
-                    .unwrap();
-            });
-            wasm_bindgen_futures::JsFuture::from(delay).await?;
+        // Camera switch — try facingMode first, fall back to deviceId, retry with delays
+        let strategies: Vec<(&str, &str)> = if !facing_mode.is_empty() {
+            // Try facingMode first (more reliable), then deviceId as fallback
+            vec![("facingMode", facing_mode), ("deviceId", device_id)]
+        } else {
+            vec![("deviceId", device_id)]
+        };
 
-            let promise = media_devices.get_user_media_with_constraints(&constraints)?;
-            match wasm_bindgen_futures::JsFuture::from(promise).await {
-                Ok(s) => {
-                    log::info!("getUserMedia succeeded on attempt {}", attempt + 1);
-                    return self.attach_stream(s).await;
+        let delays_ms = [200, 500, 1500, 3000];
+        for (strat_name, strat_val) in &strategies {
+            let c = if *strat_name == "facingMode" {
+                Self::build_constraints("", strat_val)?
+            } else {
+                Self::build_constraints(strat_val, "")?
+            };
+
+            for (attempt, &ms) in delays_ms.iter().enumerate() {
+                log::info!("Waiting {}ms, attempt {} via {}={}...", ms, attempt + 1, strat_name, strat_val);
+                let delay = js_sys::Promise::new(&mut |resolve, _| {
+                    web_sys::window().unwrap()
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms)
+                        .unwrap();
+                });
+                wasm_bindgen_futures::JsFuture::from(delay).await?;
+
+                let promise = media_devices.get_user_media_with_constraints(&c)?;
+                match wasm_bindgen_futures::JsFuture::from(promise).await {
+                    Ok(s) => {
+                        log::info!("getUserMedia succeeded via {} on attempt {}", strat_name, attempt + 1);
+                        return self.attach_stream(s).await;
+                    }
+                    Err(e) => {
+                        log::warn!("Attempt {} via {} failed: {:?}", attempt + 1, strat_name, e);
+                    }
                 }
-                Err(e) if attempt < delays_ms.len() - 1 => {
-                    log::warn!("getUserMedia attempt {} failed: {:?}", attempt + 1, e);
-                }
-                Err(e) => return Err(e),
             }
         }
-        unreachable!()
+        Err(JsValue::from_str("All camera switch attempts failed"))
     }
 
     async fn attach_stream(&self, stream: JsValue) -> Result<(), JsValue> {
-
         let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
         self.video.set_src_object(Some(&stream_obj));
 
@@ -140,17 +169,15 @@ impl VideoCapture {
             let facing = js_sys::Reflect::get(settings.as_ref(), &"facingMode".into())
                 .ok()
                 .and_then(|v| v.as_string());
-            // Mirror unless explicitly "environment" (back camera)
             self.mirrored.set(facing.as_deref() != Some("environment"));
         }
 
         let play_promise = self.video.play()?;
         wasm_bindgen_futures::JsFuture::from(play_promise).await?;
 
-        // Wait a moment for the video to report its actual dimensions
+        // Wait for video to report actual dimensions
         let promise = js_sys::Promise::new(&mut |resolve, _| {
-            let window = web_sys::window().unwrap();
-            window
+            web_sys::window().unwrap()
                 .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 200)
                 .unwrap();
         });
@@ -178,8 +205,7 @@ impl VideoCapture {
         self._canvas.set_height(height);
     }
 
-    /// Grab the current video frame into a caller-provided buffer, reusing its
-    /// allocation.  The buffer is cleared and refilled each call.
+    /// Grab the current video frame into a caller-provided buffer.
     pub fn grab_frame_into(&self, dest: &mut Vec<u32>) -> Result<(), JsValue> {
         if self.mirrored.get() {
             self.ctx2d.save();
@@ -189,11 +215,7 @@ impl VideoCapture {
 
         self.ctx2d
             .draw_image_with_html_video_element_and_dw_and_dh(
-                &self.video,
-                0.0,
-                0.0,
-                self.width as f64,
-                self.height as f64,
+                &self.video, 0.0, 0.0, self.width as f64, self.height as f64,
             )?;
 
         if self.mirrored.get() {
@@ -203,7 +225,6 @@ impl VideoCapture {
         let image_data =
             self.ctx2d
                 .get_image_data(0.0, 0.0, self.width as f64, self.height as f64)?;
-
         let raw: Vec<u8> = image_data.data().0;
 
         dest.clear();

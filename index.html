@@ -160,6 +160,8 @@
         });
 
         // ── Camera enumeration ──
+        // Store facing mode info for each camera
+        const cameraFacing = {};
         async function populateCameras() {
             try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
@@ -169,10 +171,18 @@
                 cams.forEach((cam, i) => {
                     const opt = document.createElement('option');
                     opt.value = cam.deviceId;
-                    opt.textContent = cam.label || `Camera ${i + 1}`;
+                    const label = cam.label || `Camera ${i + 1}`;
+                    opt.textContent = label;
                     sel.appendChild(opt);
+                    // Guess facing mode from label
+                    const lo = label.toLowerCase();
+                    if (lo.includes('back') || lo.includes('rear') || lo.includes('environment')) {
+                        cameraFacing[cam.deviceId] = 'environment';
+                    } else if (lo.includes('front') || lo.includes('user') || lo.includes('facing front')) {
+                        cameraFacing[cam.deviceId] = 'user';
+                    }
                 });
-                dbg(`Found ${cams.length} camera(s)`);
+                dbg(`Found ${cams.length} camera(s), facing: ${JSON.stringify(cameraFacing)}`);
             } catch (e) {
                 dbg(`Camera enumeration failed: ${e}`);
             }
@@ -219,12 +229,13 @@
                 // Enumerate cameras now that permission is granted
                 await populateCameras();
 
-                // Camera switch
+                // Camera switch — pass facing mode if known (more reliable than deviceId on mobile)
                 document.getElementById('camera').addEventListener('change', async (e) => {
                     const deviceId = e.target.value;
-                    dbg(`Switching to camera: ${deviceId}`);
+                    const facing = cameraFacing[deviceId] || '';
+                    dbg(`Switching to camera: ${deviceId} facing=${facing || 'unknown'}`);
                     try {
-                        await wasm.start_with_camera(deviceId);
+                        await wasm.start_with_camera(deviceId, facing);
                         if (window.__mamp_aspect) {
                             document.getElementById('output').style.aspectRatio = String(window.__mamp_aspect);
                         }

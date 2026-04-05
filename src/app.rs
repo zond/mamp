@@ -72,7 +72,7 @@ async fn yield_to_browser() {
 
 #[allow(clippy::await_holding_refcell_ref)]
 #[wasm_bindgen]
-pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
+pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(), JsValue> {
     let window = web_sys::window().unwrap();
     let state_js = js_sys::Reflect::get(&window, &"__mamp_state".into())?;
     if state_js.is_undefined() {
@@ -90,7 +90,7 @@ pub async fn start_with_camera(device_id: &str) -> Result<(), JsValue> {
 
     {
         let s = shared.state.borrow();
-        s.capture.start_with_device(device_id).await?;
+        s.capture.start_with_device(device_id, facing_mode).await?;
     }
 
     {
@@ -129,7 +129,7 @@ pub async fn start() -> Result<(), JsValue> {
 
     let initial_max = DEFAULT_MAX_WIDTH;
     let mut capture = VideoCapture::new(initial_max, initial_max * 3 / 4)?;
-    capture.start_with_device("").await?;
+    capture.start_with_device("", "").await?;
     let (cam_w, cam_h) = capture.actual_size();
     let (w, h) = processing_size(cam_w, cam_h, DEFAULT_MAX_WIDTH);
     log::info!("Camera: {}x{}, processing: {}x{}", cam_w, cam_h, w, h);

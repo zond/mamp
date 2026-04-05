@@ -56,10 +56,24 @@ impl VideoCapture {
         })
     }
 
+    /// Try to acquire a media stream with the given constraints.
+    /// Returns Ok(stream) on success, Err on failure.
+    async fn try_get_stream(
+        media_devices: &web_sys::MediaDevices,
+        video_constraints: &JsValue,
+    ) -> Result<web_sys::MediaStream, JsValue> {
+        let constraints = MediaStreamConstraints::new();
+        constraints.set_video(video_constraints);
+        constraints.set_audio(&JsValue::FALSE);
+        let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
+        let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
+        Ok(stream.unchecked_into())
+    }
+
     /// Start camera with optional device ID and facing mode.
     pub async fn start_with_device(&self, device_id: &str, facing_mode: &str) -> Result<(), JsValue> {
-        // Stop any existing stream — keep it simple (no pause, no load)
-        if let Some(old_stream) = self.video.src_object() {
+        // Stop any existing stream
+        let switching = if let Some(old_stream) = self.video.src_object() {
             let old: web_sys::MediaStream = old_stream.unchecked_into();
             let tracks = old.get_tracks();
             for i in 0..tracks.length() {
@@ -67,36 +81,97 @@ impl VideoCapture {
                 track.stop();
             }
             self.video.set_src_object(None);
+            true
+        } else {
+            false
+        };
+
+        // track.stop() returns synchronously but hardware release is async.
+        // Android Camera2 needs time to close the device.
+        if switching {
+            let delay = js_sys::Promise::new(&mut |resolve, _| {
+                web_sys::window().unwrap()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 300)
+                    .unwrap();
+            });
+            wasm_bindgen_futures::JsFuture::from(delay).await?;
         }
 
         let window = web_sys::window().unwrap();
         let media_devices = window.navigator().media_devices()?;
 
-        // Build constraints — prefer facingMode on mobile, fall back to deviceId
-        let constraints = MediaStreamConstraints::new();
-        let vc = js_sys::Object::new();
+        // Build the fallback chain of constraint objects to try in order.
+        let mut attempts: Vec<(String, JsValue)> = Vec::new();
 
-        if !facing_mode.is_empty() {
-            let exact = js_sys::Object::new();
-            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(facing_mode))?;
-            js_sys::Reflect::set(&vc, &"facingMode".into(), &exact)?;
-            log::info!("Requesting camera via facingMode={}", facing_mode);
-        } else if !device_id.is_empty() {
+        if !device_id.is_empty() {
+            // Attempt 1: deviceId + processing resolution (the original working pattern)
+            let vc = js_sys::Object::new();
             let exact = js_sys::Object::new();
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
-            log::info!("Requesting camera via deviceId={}", device_id);
-        } else {
-            log::info!("Requesting default camera");
+            js_sys::Reflect::set(&vc, &"width".into(), &JsValue::from_f64(self.width as f64))?;
+            js_sys::Reflect::set(&vc, &"height".into(), &JsValue::from_f64(self.height as f64))?;
+            attempts.push((
+                format!("deviceId={} + {}x{}", device_id, self.width, self.height),
+                vc.into(),
+            ));
         }
 
-        constraints.set_video(&vc.into());
-        constraints.set_audio(&JsValue::FALSE);
+        if !facing_mode.is_empty() {
+            // Attempt 2: facingMode alone
+            let vc = js_sys::Object::new();
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(facing_mode))?;
+            js_sys::Reflect::set(&vc, &"facingMode".into(), &exact)?;
+            attempts.push((
+                format!("facingMode={}", facing_mode),
+                vc.into(),
+            ));
+        }
 
-        let stream_promise = media_devices.get_user_media_with_constraints(&constraints)?;
-        let stream = wasm_bindgen_futures::JsFuture::from(stream_promise).await?;
+        if !device_id.is_empty() {
+            // Attempt 3: deviceId alone (no resolution constraints)
+            let vc = js_sys::Object::new();
+            let exact = js_sys::Object::new();
+            js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
+            js_sys::Reflect::set(&vc, &"deviceId".into(), &exact)?;
+            attempts.push((
+                format!("deviceId={} (no resolution)", device_id),
+                vc.into(),
+            ));
+        }
 
-        let stream_obj: web_sys::MediaStream = stream.unchecked_ref::<web_sys::MediaStream>().clone();
+        if attempts.is_empty() {
+            // No device_id or facing_mode — request default camera
+            attempts.push((
+                "default camera".to_string(),
+                JsValue::TRUE,
+            ));
+        }
+
+        let mut last_err: Option<JsValue> = None;
+        let mut stream_obj: Option<web_sys::MediaStream> = None;
+
+        for (label, vc) in &attempts {
+            log::info!("Trying camera: {}", label);
+            match Self::try_get_stream(&media_devices, vc).await {
+                Ok(s) => {
+                    log::info!("Camera opened: {}", label);
+                    stream_obj = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("Camera attempt failed ({}): {:?}", label, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        let stream_obj = match stream_obj {
+            Some(s) => s,
+            None => return Err(last_err.unwrap_or_else(|| JsValue::from_str("No camera available"))),
+        };
+
         self.video.set_src_object(Some(&stream_obj));
 
         // Detect facing mode to decide mirroring

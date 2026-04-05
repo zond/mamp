@@ -11,6 +11,10 @@ use crate::video::VideoCapture;
 
 const DEFAULT_MAX_WIDTH: u32 = 640;
 
+thread_local! {
+    static SHARED: RefCell<Option<Rc<Shared>>> = RefCell::new(None);
+}
+
 /// Max FFT length based on device's workgroup shared memory.
 /// 2048 needs 16KB, 1024 needs 8KB.
 fn max_fft_for_device(device: &wgpu::Device) -> u32 {
@@ -73,13 +77,9 @@ async fn yield_to_browser() {
 #[allow(clippy::await_holding_refcell_ref)]
 #[wasm_bindgen]
 pub async fn start_with_camera(device_id: &str, facing_mode: &str) -> Result<(), JsValue> {
+    let shared = SHARED.with(|s| s.borrow().clone())
+        .ok_or_else(|| JsValue::from_str("Not initialized yet"))?;
     let window = web_sys::window().unwrap();
-    let state_js = js_sys::Reflect::get(&window, &"__mamp_state".into())?;
-    if state_js.is_undefined() {
-        return Err(JsValue::from_str("Not initialized yet"));
-    }
-    let ptr = state_js.as_f64().unwrap() as usize;
-    let shared: &Rc<Shared> = unsafe { &*(ptr as *const Rc<Shared>) };
 
     shared.running.set(false);
 
@@ -155,8 +155,7 @@ pub async fn start() -> Result<(), JsValue> {
         running: Cell::new(true),
     });
 
-    let shared_ptr = Box::into_raw(Box::new(shared.clone())) as usize;
-    js_sys::Reflect::set(&window, &"__mamp_state".into(), &JsValue::from_f64(shared_ptr as f64))?;
+    SHARED.with(|s| *s.borrow_mut() = Some(shared.clone()));
 
     wasm_bindgen_futures::spawn_local(run_loop(shared.clone()));
 

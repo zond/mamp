@@ -51,19 +51,17 @@ pub struct SteerablePipeline {
     pl_apply: ComputePipeline,
     pl_accum: ComputePipeline,
     pl_phase: ComputePipeline,
+    pl_clear: ComputePipeline,
     pl_blit: RenderPipeline,
     surface: Surface<'static>,
 
     // Buffers that need CPU writes each frame
     b_rgba_in: Buffer,
     u_phase: Buffer,
-    // Buffers for accumulator clear (encoder-level copy)
-    b_zeros: Buffer,
-    b_acc_re: Buffer,
-    b_acc_im: Buffer,
 
     // Pre-created bind groups
     bg_r2y: BindGroup,
+    bg_clear_acc: BindGroup,
     bg_fft_y_row: BindGroup,
     bg_fft_y_col: BindGroup,
     bg_apply: Vec<BindGroup>,
@@ -103,6 +101,7 @@ impl SteerablePipeline {
         let b_y = mk("sy", ppix * 4);
         let b_i = mk("si_c", ppix * 4);
         let b_q = mk("sq", ppix * 4);
+        // Zeros buffer for FFT imaginary input (Y is real-valued)
         let b_zeros = mk("sz", ppix * 4);
         ctx.queue.write_buffer(&b_zeros, 0, &vec![0u8; (ppix * 4) as usize]);
 
@@ -147,6 +146,7 @@ impl SteerablePipeline {
         let pl_accum = mkc("accum", include_str!("shaders/apply_filter_accum.wgsl"));
         let pl_phase = mkc("phase", include_str!("shaders/phase_amplify.wgsl"));
         let pl_add = mkc("add", include_str!("shaders/add_buffers.wgsl"));
+        let pl_clear = mkc("clear", include_str!("shaders/clear_buffer.wgsl"));
 
         // ── Surface + blit ──
         let canvas: web_sys::HtmlCanvasElement = web_sys::window().unwrap()
@@ -271,7 +271,8 @@ impl SteerablePipeline {
             })
         };
 
-        // Pass 1: color convert + forward FFT
+        // Bind groups
+        let bg_clear_acc = mk_bg(&pl_clear, &[&u_pdims, &b_acc_re, &b_acc_im]);
         let bg_r2y = mk_bg(&pl_r2y, &[&u_color, &b_rgba_in, &b_y, &b_i, &b_q]);
         let bg_fft_y_row = mk_bg(&pl_fft, &[&u_fft_rf, &b_y, &b_zeros, &b_tmp_re, &b_tmp_im]);
         let bg_fft_y_col = mk_bg(&pl_fft, &[&u_fft_cf, &b_tmp_re, &b_tmp_im, &b_spec_re, &b_spec_im]);
@@ -314,9 +315,9 @@ impl SteerablePipeline {
 
         Self {
             ow: w, oh: h, pw, ph, n_scales, n_orient, n_band,
-            pl_r2y, pl_y2r, pl_fft, pl_apply, pl_accum, pl_phase, pl_blit, surface,
-            b_rgba_in, u_phase, b_zeros, b_acc_re, b_acc_im,
-            bg_r2y, bg_fft_y_row, bg_fft_y_col,
+            pl_r2y, pl_y2r, pl_fft, pl_apply, pl_accum, pl_phase, pl_clear, pl_blit, surface,
+            b_rgba_in, u_phase,
+            bg_r2y, bg_clear_acc, bg_fft_y_row, bg_fft_y_col,
             bg_apply, bg_ifft_sb_col, bg_ifft_sb_row,
             bg_phase, bg_fft_mod_row, bg_fft_mod_col,
             bg_accum, bg_res,
@@ -353,22 +354,17 @@ impl SteerablePipeline {
 
         let wg = (pw.div_ceil(16), ph.div_ceil(16), 1);
 
-        // ── Compute pass 1: color convert + forward FFT ──
+        // ── Single compute pass ──
         {
             let mut p = enc.begin_compute_pass(&ComputePassDescriptor { label: None, timestamp_writes: None });
+
+            // Color convert + forward FFT
             Self::rec(&mut p, &self.pl_r2y, &self.bg_r2y, (pw.div_ceil(16), ph.div_ceil(16), 1));
             Self::rec(&mut p, &self.pl_fft, &self.bg_fft_y_row, (ph, 1, 1));
             Self::rec(&mut p, &self.pl_fft, &self.bg_fft_y_col, (pw, 1, 1));
-        }
 
-        // Clear accumulators (encoder-level copy, between compute passes)
-        let copy_sz = (pw * ph * 4) as u64;
-        enc.copy_buffer_to_buffer(&self.b_zeros, 0, &self.b_acc_re, 0, copy_sz);
-        enc.copy_buffer_to_buffer(&self.b_zeros, 0, &self.b_acc_im, 0, copy_sz);
-
-        // ── Compute pass 2: sub-band processing + reconstruction ──
-        {
-            let mut p = enc.begin_compute_pass(&ComputePassDescriptor { label: None, timestamp_writes: None });
+            // Clear accumulators (compute dispatch, stays in same pass)
+            Self::rec(&mut p, &self.pl_clear, &self.bg_clear_acc, wg);
 
             for idx in 0..self.n_band {
                 // Analysis: apply pre-computed filter

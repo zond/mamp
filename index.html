@@ -136,8 +136,9 @@
 
     <script type="module">
         const debugEl = document.getElementById('debug-log');
+        const BUILD_VERSION = 17;
         const MAX_LOG_LINES = 200;
-        const logLines = [];
+        const logLines = [`[build] v${BUILD_VERSION}`];
         function dbg(msg) {
             const ts = new Date().toISOString().slice(11, 23);
             logLines.push(`[${ts}] ${msg}`);

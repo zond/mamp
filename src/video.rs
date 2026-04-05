@@ -60,6 +60,7 @@ impl VideoCapture {
     pub async fn start_with_device(&self, device_id: &str) -> Result<(), JsValue> {
         // Stop any existing stream first so the device is released
         if let Some(old_stream) = self.video.src_object() {
+            self.video.pause().ok();
             let old: web_sys::MediaStream = old_stream.unchecked_into();
             let tracks = old.get_tracks();
             for i in 0..tracks.length() {
@@ -67,6 +68,14 @@ impl VideoCapture {
                 track.stop();
             }
             self.video.set_src_object(None);
+
+            // Give the hardware time to release the camera
+            let delay = js_sys::Promise::new(&mut |resolve, _| {
+                web_sys::window().unwrap()
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 300)
+                    .unwrap();
+            });
+            wasm_bindgen_futures::JsFuture::from(delay).await?;
         }
 
         let window = web_sys::window().unwrap();

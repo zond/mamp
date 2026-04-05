@@ -12,9 +12,9 @@ use wasm_bindgen::JsCast;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
-const N_SCALES: u32 = 3;
-const N_ORIENT: u32 = 4;
-const N_BAND: usize = (N_SCALES * N_ORIENT) as usize; // 12
+const N_SCALES: u32 = 2;
+const N_ORIENT: u32 = 2;
+const N_BAND: usize = (N_SCALES * N_ORIENT) as usize; // 4
 
 fn next_pow2(n: u32) -> u32 {
     if n.is_power_of_two() { n } else { n.next_power_of_two() }

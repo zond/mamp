@@ -1,105 +1,87 @@
-# motion-mag-webgpu
+# MAMP — Motion Amplification
 
-Real-time video motion magnification running entirely in the browser via **Rust → WebAssembly → WebGPU**.
+Real-time video motion magnification in the browser using WebGPU.
 
-Implements the efficient architecture from [Ha et al. 2024](https://arxiv.org/abs/2403.01898),
-which achieves 4.2× fewer FLOPs than the Oh et al. 2018 baseline while maintaining comparable quality.
+**[Live Demo →](https://zond.github.io/mamp/)**
+
+Point your camera at something with subtle motion — breathing, a vibrating surface, a candle flame — and the app amplifies the motion so it becomes visible.
+
+## How It Works
+
+**Complex Steerable Pyramid** (Simoncelli & Freeman) with **phase-based motion amplification** (Wadhwa et al. 2013).
+
+Per frame (~92 GPU dispatches):
+1. Camera RGBA → YIQ color space (luminance + chrominance)
+2. Pad luminance to power-of-2 with mirror padding
+3. Forward 2D FFT
+4. Decompose into 12 oriented sub-bands (3 scales × 4 orientations)
+5. For each sub-band: extract phase → IIR temporal bandpass → amplify → rotate phase
+6. Reconstruct via filter accumulation
+7. Inverse 2D FFT → modified luminance
+8. Recombine with original chrominance → RGBA → render to WebGPU canvas
+
+Phase-based amplification (vs. intensity-based EVM) handles larger motions without ghosting because it amplifies spatial displacement directly rather than pixel intensity changes.
+
+## Controls
+
+- **Amplify**: magnification factor (1-200x)
+- **Center Hz / BW Hz**: temporal bandpass frequency band
+  - 0.5-3 Hz: breathing, pulse
+  - 1-10 Hz: tremor, vibration
+  - Higher: structural resonance (limited by camera framerate / Nyquist)
+- **Camera**: select front/back camera
+- **Res**: processing resolution (lower = faster)
+- Click canvas to toggle fullscreen
 
 ## Architecture
 
 ```
-Camera → [RGBA→CHW] → Encoder → Manipulator → Decoder → [CHW→RGBA] → Canvas
-  30fps     GPU          GPU         GPU          GPU        GPU        Display
+src/
+  lib.rs              Module declarations (cfg-gated for wasm32)
+  app.rs              WASM entry point, animation loop, JS interop
+  gpu.rs              WebGPU device + adapter setup
+  steerable.rs        Steerable pyramid pipeline (FFT + phase amplification)
+  video.rs            Camera capture via getUserMedia
+  shaders/
+    fft.wgsl                1D FFT (up to 2048, shared memory)
+    steerable_filters.wgsl  Frequency-domain oriented filter bank
+    filter_accumulate.wgsl  Apply filter + accumulate (reconstruction)
+    phase_amplify.wgsl      Phase extraction + IIR bandpass + amplify
+    rgba_to_y.wgsl          RGBA -> YIQ + mirror padding
+    yiq_to_rgba.wgsl        Modified Y + I,Q -> RGBA + crop
+    blit.wgsl               Fullscreen quad: storage buffer -> canvas
 ```
 
-**Encoder** (single branch — Ha et al. key finding):
-- Conv2D 3→16, k3s1p1, ReLU
-- Conv2D 16→32, k3s2p1, ReLU (spatial downsample 2×)
-- Conv2D 32→32, k3s1p1, ReLU → shape representation
-- Conv2D 32→32, k1s1p0       → texture representation
-
-**Manipulator**:
-- `output = texture + α × (shape_b − shape_a)`
-
-**Decoder** (reduced-resolution latent — Ha et al. key finding):
-- Conv2D 32→32, k3s1p1, ReLU (at half resolution)
-- Bilinear upsample 2×
-- Conv2D 32→16, k3s1p1, ReLU
-- Conv2D 16→3, k3s1p1 (no activation)
-
-All convolutions run as WebGPU compute shaders dispatched per output pixel.
-
-## Project structure
-
-```
-├── Cargo.toml              # Rust deps (wgpu, wasm-bindgen, web-sys)
-├── build.sh                # wasm-pack build script
-├── index.html              # Browser frontend with controls
-├── export_weights.py       # PyTorch → raw f32 weight exporter
-└── src/
-    ├── lib.rs              # WASM entry, animation loop
-    ├── gpu.rs              # WebGPU device, buffer, dispatch helpers
-    ├── model.rs            # Ha et al. model (encoder/manipulator/decoder)
-    ├── video.rs            # Camera capture + canvas rendering
-    ├── weights.rs          # Weight loading from binary files
-    └── shaders/
-        ├── conv2d.wgsl     # General Conv2D + ReLU compute kernel
-        ├── manipulator.wgsl # Motion diff + amplification
-        ├── upsample.wgsl   # Bilinear 2× upsampling
-        └── frame_io.wgsl   # RGBA ↔ CHW tensor conversion
-```
-
-## Build
+## Building
 
 ```bash
-# Prerequisites
-cargo install wasm-pack
-rustup target add wasm32-unknown-unknown
+# Build WASM
+wasm-pack build --target web --release --out-dir pkg
+cp index.html pkg/
+cd pkg && python3 -m http.server 8080
+# Open http://localhost:8080
 
-# Build
-chmod +x build.sh
-./build.sh
-
-# Serve (needs HTTPS for camera + WebGPU)
-cd pkg
-npx http-server -S -C cert.pem -K key.pem -p 8443
+# Run GPU shader tests (requires Vulkan GPU)
+cargo test --features native-test -- --nocapture
 ```
 
-## Loading trained weights
+## Tests
 
-The model ships with random placeholder weights. To use real weights:
+33 GPU unit tests verify each shader component:
+- FFT: 1D (N up to 2048), 2D (row+col), roundtrip, vs CPU DFT
+- Steerable filters: partition of unity, orientation/scale selectivity
+- Phase amplification: passthrough, magnitude preservation, temporal filtering
+- Color conversion: YIQ roundtrip, mirror padding
+- End-to-end: decompose -> reconstruct = original
 
-1. Train or obtain a checkpoint from the [Ha et al. codebase](https://arxiv.org/abs/2403.01898)
-2. Export: `python export_weights.py --checkpoint model.pth --outdir pkg/weights/`
-3. In `lib.rs`, replace `MotionMagModel::new()` with a version that calls
-   `weights::load_weight_file()` for each layer
+## Requirements
 
-## Production improvements
-
-This skeleton prioritizes clarity over perf. For production:
-
-- **Eliminate CPU readback**: Render the output buffer directly to a WebGPU
-  texture, then blit to canvas via a render pipeline. Avoids the GPU→CPU→GPU
-  round-trip in the current `process_frame()`.
-- **Double-buffer frames**: Overlap GPU inference on frame N with camera capture
-  of frame N+1.
-- **Fused kernels**: Merge sequential conv layers into fewer dispatches using
-  shared memory tiling.
-- **Temporal filtering**: Add optional IIR bandpass in a compute shader between
-  encoder and manipulator for frequency-selective magnification.
-- **Quantize weights**: FP16 storage with FP32 compute cuts memory bandwidth
-  in half. wgpu supports `f16` storage buffers on capable GPUs.
-
-## Browser requirements
-
-- Chrome 113+ or Edge 113+ (WebGPU)
-- Camera access (HTTPS required)
-- Firefox: behind `dom.webgpu.enabled` flag (experimental)
+- Browser: Chrome 113+ or Edge 113+ (WebGPU required)
+- Camera: HTTPS or localhost (getUserMedia requirement)
+- GPU: WebGPU-capable (most modern GPUs)
 
 ## References
 
-- Ha et al., "Revisiting Learning-based Video Motion Magnification for
-  Real-time Processing," 2024. arXiv:2403.01898
-- Oh et al., "Learning-based Video Motion Magnification," ECCV 2018.
-- Wu et al., "Eulerian Video Magnification for Revealing Subtle Changes
-  in the World," SIGGRAPH 2012.
+- Wadhwa et al. 2013, "Phase-Based Video Motion Processing" (MIT)
+- Simoncelli & Freeman, "The Steerable Pyramid" (NYU)
+- Wu et al. 2012, "Eulerian Video Magnification" (MIT)

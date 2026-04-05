@@ -90,9 +90,10 @@ impl VideoCapture {
             js_sys::Reflect::set(&exact, &"exact".into(), &JsValue::from_str(device_id))?;
             js_sys::Reflect::set(&video_constraints, &"deviceId".into(), &exact)?;
         }
-        // Use ideal resolution close to processing size — avoids wasting CPU on downscaling
+        // Request 640 as ideal — covers all processing resolutions without
+        // wasting bandwidth, and stays fixed across res selector changes
         let ideal_w = js_sys::Object::new();
-        js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(self.width))?;
+        js_sys::Reflect::set(&ideal_w, &"ideal".into(), &JsValue::from(640))?;
         js_sys::Reflect::set(&video_constraints, &"width".into(), &ideal_w)?;
         constraints.set_video(&video_constraints.into());
         constraints.set_audio(&JsValue::FALSE);

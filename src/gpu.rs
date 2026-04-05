@@ -33,31 +33,31 @@ impl GpuContext {
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .expect("Failed to create surface");
 
+        // Try adapters in order: default (lets browser pick best compatible),
+        // then high-performance, then low-power. On PRIME/Optimus laptops,
+        // HighPerformance may pick a dGPU that can compute but can't present
+        // to the iGPU-driven display, causing black screen.
         log::info!("Requesting WebGPU adapter (compatible with surface)...");
-        let adapter = match instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                log::warn!(
-                    "High-performance adapter failed: {:?}, trying low power...",
-                    e
-                );
-                instance
-                    .request_adapter(&RequestAdapterOptions {
-                        power_preference: PowerPreference::LowPower,
-                        compatible_surface: Some(&surface),
-                        force_fallback_adapter: false,
-                    })
-                    .await
-                    .expect("No WebGPU adapter found. Try Chrome with --enable-unsafe-webgpu")
+        let prefs = [
+            PowerPreference::None,
+            PowerPreference::HighPerformance,
+            PowerPreference::LowPower,
+        ];
+        let mut adapter = None;
+        for pref in prefs {
+            match instance
+                .request_adapter(&RequestAdapterOptions {
+                    power_preference: pref,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await
+            {
+                Ok(a) => { adapter = Some(a); break; }
+                Err(e) => log::warn!("Adapter {:?} failed: {:?}", pref, e),
             }
-        };
+        }
+        let adapter = adapter.expect("No WebGPU adapter found. Try Chrome with --enable-unsafe-webgpu");
 
         log::info!("Adapter: {:?}", adapter.get_info());
 
